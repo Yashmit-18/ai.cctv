@@ -1114,6 +1114,10 @@ def run(args: argparse.Namespace | None = None):
                         cid, h.get("frame_mean", 0.0), config.BLACK_FRAME_MEAN, n,
                     )
 
+            # Keep the security health FSM ticking even when every feed is
+            # unusable.  Detection is deliberately skipped in that case, and
+            # the employee tracker remains frozen below.
+            detections = []
             if frames:
                 # Backend load-or-detect for this step.  Guarantees a defined
                 # (possibly empty) `detections` list every iteration, including
@@ -1179,19 +1183,6 @@ def run(args: argparse.Namespace | None = None):
                 if any(d.get("person_present") for d in detections):
                     last_detection_at = time.time()
 
-                # -- Phase 31: Security engine tick --
-                # Isolated: a single tick failure must not kill the daemon.
-                try:
-                    security.tick(
-                        detections=detections,
-                        camera_health=health,
-                        frames=frames,
-                        detector_unavailable=(detector is None
-                                              or getattr(detector, "model", None) is None),
-                    )
-                except Exception as err:
-                    logger.exception("Security tick failed (isolated): %s", err)
-
                 # -- Phase 33: advisory intelligence (temporal/anomaly/risk) --
                 # Isolated inside the engine (never breaks the main pipeline).
                 try:
@@ -1226,6 +1217,23 @@ def run(args: argparse.Namespace | None = None):
                 # No *usable* live frames -- freeze timers so a dead or
                 # blank/frozen camera can never accrue AWAY time.
                 last_processed = time.time()
+
+            # -- Phase 31: Security engine tick --
+            # Camera health must be evaluated even when no feed supplies a
+            # usable frame; otherwise an all-camera outage can never reach the
+            # CAMERA_OFFLINE transition.  Do not call a missing detector a
+            # detector failure while there is no frame to inspect: that would
+            # change the established all-camera-outage event semantics.
+            try:
+                security.tick(
+                    detections=detections,
+                    camera_health=health,
+                    frames=frames,
+                    detector_unavailable=bool(frames) and (
+                        detector is None or getattr(detector, "model", None) is None),
+                )
+            except Exception as err:
+                logger.exception("Security tick failed (isolated): %s", err)
 
             states = tracker.live_states()
             employee_ids = tracker.employee_ids
