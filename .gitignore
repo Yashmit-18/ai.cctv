@@ -42,3 +42,5 @@ env/
 *.swo
 Thumbs.db
 .DS_Store
+# Local backup files
+main_backup_*.py
