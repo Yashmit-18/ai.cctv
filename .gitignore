@@ -1,0 +1,44 @@
+# ============================================================
+# CCTV Employee Productivity Tracker -- .gitignore
+# ============================================================
+# Never commit secrets, live data, trained models, or the venv.
+
+# ---- Environment & secrets -------------------------------------
+.env
+.env.*
+!.env.example
+
+# ---- Live data (faces, DB, reports, snapshots, EOD state) ------
+data/
+# Keep the folder on disk (git needs a placeholder to track it):
+!data/.gitkeep
+
+# ---- ML models (large weights; re-download on setup) -----------
+models/*.pt
+models/yolov8*.pt
+
+# ---- Python -----------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.log
+
+# ---- Virtual environments / packaging --------------------------
+.venv/
+venv/
+env/
+
+# ---- IDE / OS ----------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store

@@ -1,0 +1,55 @@
+# ============================================================
+# CCTV Employee Productivity Tracker -- .dockerignore
+# ============================================================
+# Keeps secrets, biometric data, live data, models and the venv
+# OUT of the Docker build context (and therefore out of the image).
+# The Dockerfile uses `COPY . .` so anything listed here is excluded.
+
+# ---- Environment & secrets -------------------------------------
+.env
+.env.*
+!.env.example
+
+# ---- Live + biometric data (faces, embeddings, DB, evidence, logs) ----
+# data/ holds employee face images (data/faces) and face embeddings
+# (data/embeddings.pkl). It must NOT be baked into the image; it is a
+# dedicated VOLUME mounted from the host at runtime.
+data/
+logs/
+
+# ---- ML models (large weights; provided at runtime) -----------
+models/
+
+# ---- Python / caches -------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.log
+
+# ---- Virtual environments / packaging --------------------------
+.venv/
+venv/
+env/
+
+# ---- VCS / IDE / OS ----------------------------------------------
+.git/
+.gitignore
+.gitattributes
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# ---- Docs / local artifacts not needed at runtime ---------------
+*.md
+README.md
+PROJECT_FULL_SYSTEM_AUDIT.md

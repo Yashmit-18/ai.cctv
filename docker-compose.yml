@@ -1,0 +1,139 @@
+# =====================================================================
+# CCTV Employee Productivity Tracker -- Docker Compose
+# =====================================================================
+# Two services share a single SQLite volume:
+#   * ai_daemon     - headless AI tracking service (YOLO inference)
+#   * web_dashboard - Streamlit management dashboard
+#
+# Both read/write the same ./data directory on the host so the database,
+# JSON presets and Excel reports persist across restarts.
+#
+# Prerequisites:
+#   * Docker with Compose v2
+#   * NVIDIA Container Toolkit (nvidia-container-toolkit) for GPU passthrough
+#
+# Usage:
+#   docker compose build
+#   docker compose up -d
+# =====================================================================
+
+services:
+
+  # -------------------------------------------------------------------
+  # Service 1: Headless AI Daemon
+  # -------------------------------------------------------------------
+  ai_daemon:
+    build:
+      context: .
+      # Use the CUDA base image for GPU inference. Swap to a pure
+      # CPU image if you are not using an NVIDIA GPU (see Dockerfile).
+      args:
+        BASE_IMAGE: nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+    container_name: cctv-ai-daemon
+    # Run headless; multi-camera pool is configured via CCTV_CAM_<NN>_URL.
+    command: ["python", "main.py", "--headless", "--device", "auto"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      # The daemon re-writes data/live_state.json on every loop iteration.
+      # Healthy = the snapshot is < 2 minutes old.
+      test: ["CMD", "python", "-c",
+             "import json,time; d=json.load(open('data/live_state.json')); \
+assert time.time()-d.get('updated',0) < 120, 'stale snapshot'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    environment:
+      # Multi-camera RTSP pool (Phase 7/8). Empty values are filtered out,
+      # so only non-empty camera URLs are added to config.CAMERAS.
+      - CCTV_CAM_01_URL=${CCTV_CAM_01_URL:-}
+      - CCTV_CAM_02_URL=${CCTV_CAM_02_URL:-}
+      - CCTV_CAM_03_URL=${CCTV_CAM_03_URL:-}
+      - CCTV_CAM_04_URL=${CCTV_CAM_04_URL:-}
+      - CCTV_CAM_05_URL=${CCTV_CAM_05_URL:-}
+      - CCTV_CAM_06_URL=${CCTV_CAM_06_URL:-}
+      - CCTV_CAM_07_URL=${CCTV_CAM_07_URL:-}
+      - CCTV_CAM_08_URL=${CCTV_CAM_08_URL:-}
+      - CCTV_CAM_09_URL=${CCTV_CAM_09_URL:-}
+      - CCTV_CAM_10_URL=${CCTV_CAM_10_URL:-}
+      # Tuning (optional)
+      - CCTV_MAX_BATCH_SIZE=${CCTV_MAX_BATCH_SIZE:-4}
+      - CCTV_TARGET_FPS=${CCTV_TARGET_FPS:-2}
+      # Working window / productivity scoring.
+      - CCTV_WORK_START=${CCTV_WORK_START:-09:00}
+      - CCTV_WORK_END=${CCTV_WORK_END:-18:00}
+      - CCTV_LUNCH=${CCTV_LUNCH:-12:00-13:00}
+      # EOD report scheduling (hour in 0..23; unset disables).
+      - CCTV_EOD_HOUR=${CCTV_EOD_HOUR:-19}
+      # Opt-in data retention (never deletes unless enabled).
+      - CCTV_ENABLE_RETENTION=${CCTV_ENABLE_RETENTION:-0}
+      - CCTV_RETENTION_LOGS_DAYS=${CCTV_RETENTION_LOGS_DAYS:-365}
+      # SMTP config for automated EOD email delivery (optional).
+      - SMTP_SERVER=${SMTP_SERVER:-smtp.example.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SENDER_EMAIL=${SENDER_EMAIL:-}
+      - SENDER_PASSWORD=${SENDER_PASSWORD:-}
+      - RECIPIENT_EMAILS=${RECIPIENT_EMAILS:-}
+    volumes:
+      # Persist DB, face registry, reports and logs on the host.
+      - ./data:/app/data
+    # NVIDIA GPU passthrough (requires NVIDIA Container Toolkit).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ipc: host
+    # Provide direct access to host UDP/TCP for RTSP if needed.
+    network_mode: bridge
+
+  # -------------------------------------------------------------------
+  # Service 2: Streamlit Web Dashboard
+  # -------------------------------------------------------------------
+  web_dashboard:
+    build:
+      context: .
+      # Dashboard does no inference; a lighter CPU image is sufficient.
+      args:
+        BASE_IMAGE: python:3.10-slim
+    container_name: cctv-web-dashboard
+    command: ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    restart: unless-stopped
+    stop_grace_period: 15s
+    healthcheck:
+      # Streamlit listens on 8501; verify we can open a TCP connection.
+      test: ["CMD", "python", "-c",
+             "import socket; \
+s = socket.create_connection(('127.0.0.1', 8501), 5); s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    ports:
+      # Map the Streamlit UI to the host.
+      - "8501:8501"
+    volumes:
+      # Reads the same SQLite DB + reports the daemon writes.
+      - ./data:/app/data
+    environment:
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      # Dashboard auto-refresh + role-based auth.
+      - CCTV_DASH_REFRESH=${CCTV_DASH_REFRESH:-5}
+      - CCTV_DASH_AUTH=${CCTV_DASH_AUTH:-0}
+      - CCTV_DASH_USER=${CCTV_DASH_USER:-admin}
+      - CCTV_DASH_PASS=${CCTV_DASH_PASS:-}
+      - CCTV_DASH_VIEWER_PASS=${CCTV_DASH_VIEWER_PASS:-}
+      # Working window display consistency.
+      - CCTV_WORK_START=${CCTV_WORK_START:-09:00}
+      - CCTV_WORK_END=${CCTV_WORK_END:-18:00}
+      - CCTV_LUNCH=${CCTV_LUNCH:-12:00-13:00}
+    depends_on:
+      ai_daemon:
+        condition: service_healthy
+
+# Named volumes (alternative to host bind mounts) are possible, but bind
+# mounts to ./data keep things simple and directly inspectable on the host.

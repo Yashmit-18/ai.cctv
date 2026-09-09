@@ -1,0 +1,21 @@
+# Runtime
+opencv-python>=4.9
+ultralytics>=8.0
+torch>=2.0
+pandas>=2.0
+openpyxl>=3.1
+python-dotenv>=1.0
+
+# Face Recognition / Dynamic Identification (Phase 6)
+insightface>=0.7.3
+onnxruntime-gpu>=1.15   # GPU runtime for insightface; use plain onnxruntime on CPU
+scikit-learn>=1.0       # cosine-similarity helpers (sklearn.metrics)
+numpy>=1.24
+
+# Web Dashboard (Phase 4)
+streamlit>=1.30
+plotly>=5.18
+
+# Optional (highly recommended): CPU-only PyTorch wheels are smaller.
+# Windows users can also install torch once separately:
+#   python -m pip install torch
