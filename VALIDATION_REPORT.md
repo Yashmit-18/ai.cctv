@@ -188,7 +188,7 @@ No similarity/confidence threshold changed. No output-weakening. No dummy enroll
 1. Re-run a dedicated phone test with the handset large and clearly visible for ≥15 s to confirm ON_PHONE end-to-end live (or capture one frame and inspect the YOLO phone result to decide if recall needs tuning).
 2. Replace/refresh EMP001's enrollment photo with a sharp, front-facing, well-lit current capture; re-run recognition (target: mean score ≥ 0.75, min live match ≥ 0.65).
 3. Use `--source auto` (or fix the DroidCam connection) so the daemon always follows the live device.
-4. Enroll EMP002 (Rahul Kumar) and EMP003 (Priya Sharma) with real photos; then validate two-employee simultaneous recognition live.
+4. Enroll EMP002 (Sourabh) and EMP003 (Piyush) with real photos; then validate two-employee simultaneous recognition live.
 5. Run a ≥4 h overnight soak with the daemon in place before any unattended deployment.
 6. Before wider rollout: validate RTSP/IP camera, GPU inference, and SMTP email channels explicitly.
 

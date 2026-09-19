@@ -223,9 +223,11 @@ class _FakeDetector:
         self.detections = detections
         self.raises = raises
         self.batch_calls = 0
+        self.last_kwargs = None
 
-    def detect_batch(self, frames):
+    def detect_batch(self, frames, **kwargs):
         self.batch_calls += 1
+        self.last_kwargs = kwargs
         if self.raises:
             raise RuntimeError("boom")
         return self.detections

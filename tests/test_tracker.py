@@ -104,21 +104,28 @@ def test_offline_then_recover_no_instant_commit(fake_clock, recorder, fast_buffe
     assert recorder == []
 
 
-# ---------------------------------------------------------------- presence patience
+# ---------------------------------------------------------------- presence / wall-clock away
 
-def test_person_present_holds_through_face_occlusion(fake_clock, recorder, fast_buffer):
+def test_brief_face_gap_holds_active_within_grace(fake_clock, recorder, fast_buffer):
+    """Absence under the 3s wall-clock grace keeps ACTIVE (no AWAY flicker)."""
     t = T.EmployeeTracker(None, "EMP001")
     t.process(_present())                       # ACTIVE
-    FakeTime.now += 30
-    t.process(_absent(), person_present=True)   # person in frame, face unmatched
-    assert t.committed_state == "ACTIVE"        # NOT AWAY
-    assert t.current_state == "ACTIVE"          # candidate also held
+    FakeTime.now += 2                           # < 3s
+    t.process(_absent(), person_present=True)   # face unmatched but person there
+    assert t.committed_state == "ACTIVE"
+    assert t.current_state == "ACTIVE"
     assert recorder == []
-    # person finally leaves
-    FakeTime.now += 10
-    t.process(_absent(), person_present=False)
-    assert t.committed_state == "ACTIVE"        # candidate AWAY, not yet committed
-    assert recorder == []
+
+
+def test_absence_over_grace_promotes_to_away_even_with_person(fake_clock, recorder, fast_buffer):
+    """Absence beyond 3s -> AWAY even while a person box remains on screen."""
+    t = T.EmployeeTracker(None, "EMP001")
+    t.process(_present())                       # ACTIVE
+    FakeTime.now += 4
+    t.process(_absent(), person_present=True)   # > 3s absent
+    assert t.committed_state == "AWAY"
+    assert recorder and recorder[-1][1] == "EMP001"
+    assert recorder[-1][2] == "ACTIVE"
 
 
 def test_person_gone_promotes_to_away_after_patience(fake_clock, recorder, fast_buffer):

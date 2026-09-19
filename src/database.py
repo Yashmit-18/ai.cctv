@@ -1654,6 +1654,29 @@ def insert_anomaly(conn, *, anomaly_type: str, scope: str, scope_value: str,
     conn.commit()
 
 
+def latest_anomaly_for(conn, *, anomaly_type: str, scope: str,
+                       scope_value: str) -> dict | None:
+    """Return the most recent stored anomaly row for the given identity.
+
+    Phase 54 M05 -- used by the anomaly engine to suppress identical
+    re-fires of the same (type, scope, scope_value) pattern (the historical
+    REPEATED_PATTERN_DETECTED cluster re-emitted the same count five times in a
+    minute).  ``data`` is returned as a raw JSON string; callers must decode it.
+    """
+    row = conn.execute(
+        "SELECT id, anomaly_type, scope, scope_value, severity, reason, data, "
+        "observed_at FROM anomaly_events "
+        "WHERE anomaly_type = ? AND scope = ? AND scope_value = ? "
+        "ORDER BY observed_at DESC, id DESC LIMIT 1",
+        (anomaly_type, scope, scope_value),
+    ).fetchone()
+    if not row:
+        return None
+    cols = ["id", "anomaly_type", "scope", "scope_value", "severity",
+            "reason", "data", "observed_at"]
+    return dict(zip(cols, row))
+
+
 def list_anomalies(conn, limit: int = 200) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM anomaly_events ORDER BY observed_at DESC LIMIT ?", (limit,)

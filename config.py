@@ -83,6 +83,29 @@ MAX_BATCH_SIZE = int(os.getenv("CCTV_MAX_BATCH_SIZE", "4"))
 # roughly TARGET_FPS_PER_CAMERA frames-per-second per camera (0 = every frame).
 TARGET_FPS_PER_CAMERA = int(os.getenv("CCTV_TARGET_FPS", "2"))
 
+# Phase 45: single-local-source runs (``main.py --source <index>``) are not
+# bound by the multi-camera round-robin budget.  Phase 45 measured ~268 ms per
+# full cycle and ~10 FPS on cadence-skip cycles on this CPU, so the stock
+# 2-fps cap wasted half of every loop on a sleep.  ``effective_target_fps()``
+# raises the cap to this value for single local sources ONLY and always honours
+# an explicit ``CCTV_TARGET_FPS`` (or ``CCTV_LOCAL_TARGET_FPS``).
+LOCAL_SOURCE_DEFAULT_TARGET_FPS = int(os.getenv("CCTV_LOCAL_TARGET_FPS", "4"))
+
+
+def effective_target_fps(*, local_source: bool, env=os.environ) -> int:
+    """Effective loop FPS cap for this run (Phase 45).
+
+    ``main.py --source <index>`` (single local camera) uses the faster
+    single-source cap unless the operator explicitly set ``CCTV_TARGET_FPS``;
+    every other configuration keeps ``TARGET_FPS_PER_CAMERA``.  Pure and
+    testable; the daemon calls it once at startup.
+    """
+    if local_source and "CCTV_TARGET_FPS" not in env:
+        return LOCAL_SOURCE_DEFAULT_TARGET_FPS
+    if local_source and "CCTV_TARGET_FPS" in env:
+        return int(env["CCTV_TARGET_FPS"])
+    return TARGET_FPS_PER_CAMERA
+
 # A frame older than this (seconds) is treated as STALE by the batch API
 # (``latest_frames``), which governs the daemon's ``camera_online`` signal.
 # This prevents a dead camera that still holds its last frame from keeping
@@ -130,7 +153,12 @@ ROI_PRESET_FILE = ROI_PRESETS_FILE  # legacy alias
 # ============================================================
 # DETECTION
 # ------------------------------------------------------------
-MODEL_PATH = str(PROJECT_ROOT / "models" / "yolov8n.pt")
+# Phase 46: default upgraded from yolov8n.pt to yolo11n.pt.  Local benchmark
+# (2026-09-12, synthetic frames, CODE VERIFIED / SIMULATED) showed YOLO11n
+# beats YOLOv8n on every measured axis: mAP 39.5 vs 37.3, model size 5.61 MB
+# vs 6.55 MB, phone-only @1280 252 ms vs 285 ms, person+phone @640 83.9 ms vs
+# 82.9 ms (comparable).  yolov8n.pt is retained in models/ as a fallback.
+MODEL_PATH = str(PROJECT_ROOT / "models" / "yolo11n.pt")
 CONF_THRESHOLD = 0.4
 
 # ============================================================
@@ -143,7 +171,27 @@ TARGET_FPS = 3
 # FACE RECOGNITION  (Phase 6 -- dynamic identification)
 # ------------------------------------------------------------
 FACE_MODEL = "buffalo_l"
+# CONFIRM cutoff.  FACE_SIMILARITY_THRESHOLD is the confirmation threshold:
+# a match at/above it WITH a clear margin becomes a CONFIRMED identity that
+# may adopt and switch tracks.
 FACE_SIMILARITY_THRESHOLD = 0.6
+# Phase 44B -- CANDIDATE floor.  Matches in [FACE_CANDIDATE_THRESHOLD,
+# FACE_SIMILARITY_THRESHOLD) are tentative: they may ADOPT a track that has no
+# trusted identity yet (after temporal consistency), but a candidate can NEVER
+# overwrite (demote) an already trusted identity and can never switch the
+# track's identity.  Below the candidate floor the face is Unknown -- it is a
+# candidate, not a recognition decision.  Real DroidCam baseline (Phase 44B):
+# every enrolled employee self-matches at 1.0000 and the worst cross-identity
+# similarity is 0.1961 (EMP002<->EMP003); all identities are separable, so 0.50
+# keeps a wide safety band while still granting weak partial/side poses a
+# chance on tracks that do not trust anyone yet.
+FACE_CANDIDATE_THRESHOLD = float(
+    os.getenv("CCTV_FACE_CANDIDATE_THRESHOLD", "0.50"))
+# Minimum similarity gap between best and runner-up gallery identity for a
+# CONFIRMED decision.  A frame scoring EMP003(0.61) / EMP004(0.60) is NOT
+# confirmed -- for that frame the gallery cannot tell the two identities
+# apart, so the frame is reported CANDIDATE instead of picking a winner.
+FACE_MARGIN_MIN = float(os.getenv("CCTV_FACE_MARGIN_MIN", "0.06"))
 # Cross-identity confusability ceiling.  When two DIFFERENT enrolled
 # employees share a face-similarity at or above this, face recognition alone
 # cannot separate them reliably (e.g. very similar-looking relatives).  The
@@ -173,10 +221,134 @@ FACE_DEBUG = os.getenv("CCTV_FACE_DEBUG", "0") == "1"
 # MIN_FACE_AREA).  0 disables the guard.
 LIVE_MIN_FACE_AREA = int(os.getenv("CCTV_LIVE_MIN_FACE_AREA", "7200"))
 
+# Part G (Phase 43) -- face-recognition cadence.  InsightFace ``app.get`` is
+# the most expensive stage of the pipeline (it dominates CPU a single-thread
+# frame).  ``FACE_DETECT_CADENCE`` N means each camera runs face
+# detection/recognition once every N processed cycles while YOLO person+phone
+# still runs every cycle.  Phase 44A: default raised 1 -> 5 (real DroidCam
+# measurement: ``app.get`` = ~516 ms/frame on CPU vs ~87 ms YOLO; recognition
+# every frame was the ~0.9 FPS bottleneck).  With cadence 5 the per-cycle
+# recognition cost amortizes to ~103 ms while the spatial person layer still
+# delivers every body's presence every cycle, so the employee FSM and YOLO
+# presence are never degraded -- only identity re-recognition is thinned,
+# at the cost of slightly slower identity adoption/refresh.  Set to 1 to
+# restore the legacy "faces every frame" behaviour.
+FACE_DETECT_CADENCE = int(os.getenv("CCTV_FACE_DETECT_CADENCE", "5"))
+
+# Part F (Phase 43) -- per-stage pipeline timing (opt-in, daemon only).
+# When enabled the daemon records milliseconds per stage (capture / YOLO +
+# recognition / state / live-state write / total) and publishes them into the
+# live_state payload under ``ai.timing`` so dashboard lag can be attributed to
+# the right stage instead of guessed at.  Off by default: the hot path stays
+# zero-overhead for the common case.
+PIPELINE_TIMING = os.getenv("CCTV_PIPELINE_TIMING", "0") == "1"
+
+# Part C (Phase 43) -- per-cycle phone/person association diagnostics
+# (opt-in).  When enabled the detector records per camera: person detections,
+# phone detections, phone confidence distribution, phone box sizes, how many
+# phone boxes associated to a person, and which frames ran face recognition.
+# Published under ``ai.phone_diag``.  Honest measurement -- a diagnosis step,
+# never a silent behaviour change.
+PHONE_DIAG = os.getenv("CCTV_PHONE_DIAG", "0") == "1"
+
 # A local webcam whose mean frame brightness stays below this (0-255) is
 # treated as dark/blank (e.g. DroidCam not connected, lens covered).  The
 # daemon warns loudly instead of silently reporting "nobody present".
 BLACK_FRAME_MEAN = float(os.getenv("CCTV_BLACK_FRAME_MEAN", "12"))
+
+# ============================================================
+# PHONE DETECTOR  (Phase 44 -- dedicated phone pass)
+# ------------------------------------------------------------
+# Root cause (Phase 44): YOLOv8n's COCO ``cell phone`` class is weak on small
+# phones in CCTV frames.  The fix is NOT a global confidence drop -- it is a
+# dedicated, cadence-gated, higher-resolution phone pass plus per-track
+# temporal evidence.  Configuration:
+#   CCTV_PHONE_MODEL_PATH  Absolute path to a dedicated (ideally fine-tuned)
+#                          phone YOLO model.  Empty/"" = reuse the base
+#                          person model.  If the file does not exist the
+#                          system falls back to the base model and logs a
+#                          warning (never silently dies).
+#   CCTV_PHONE_CLASS       Class id to treat as "phone".  67 = COCO cell phone
+#                          (base model).  A fine-tuned single-class phone
+#                          model commonly exposes its class as 0.
+#   CCTV_PHONE_IMGSZ       Input resolution of the dedicated phone pass.
+#                          1280 helps small phones; costs more CPU.
+#   CCTV_PHONE_DETECT_CADENCE  Run the phone pass every N processed cycles per
+#                          camera (face cadence analog).  Default 3 keeps the
+#                          pass cheap while 5-second phone use stays reliably
+#                          observable at ~2+ fps.  Never < 1.
+#   CCTV_PHONE_EVIDENCE_WINDOW / CCTV_PHONE_EVIDENCE_MIN
+#                          Per-track hysteresis: a frame's phone report counts
+#                          only when this frame is a phone detection AND at
+#                          least ``_MIN`` phone detections occurred in the
+#                          trailing ``_WINDOW`` observations.  A single random
+#                          false positive therefore can never start a phone
+#                          episode, while genuinely intermittent detections of
+#                          a real phone still accumulate evidence.
+PHONE_MODEL_PATH = os.getenv("CCTV_PHONE_MODEL_PATH", "").strip()
+PHONE_CLASS = int(os.getenv("CCTV_PHONE_CLASS", "67"))
+PHONE_IMGSZ = int(os.getenv("CCTV_PHONE_IMGSZ", "1280"))
+PHONE_DETECT_CADENCE = int(os.getenv("CCTV_PHONE_DETECT_CADENCE", "3"))
+PHONE_EVIDENCE_WINDOW = int(os.getenv("CCTV_PHONE_EVIDENCE_WINDOW", "5"))
+PHONE_EVIDENCE_MIN = int(os.getenv("CCTV_PHONE_EVIDENCE_MIN", "2"))
+
+# ============================================================
+# PERSON RE-IDENTIFICATION  (Phase 44 -- appearance identity)
+# ------------------------------------------------------------
+# A fully profile/back-facing person has no face, so InsightFace cannot
+# identify them.  APPEARANCE identity is a conservative, secondary signal
+# used ONLY to resolve a track that face recognition cannot identify.  It can
+# never outrank a face identity and is never adopted from weak/ambiguous
+# evidence (see the tracker identity-policy table in src/tracker.py).
+#   CCTV_REID_ENABLED          Master switch (default: on).
+#   CCTV_REID_MODEL_PATH       Path to a trained person-ReID model.  A
+#                              ``*.pth``/``*.pt`` file is loaded as a trained
+#                              **OSNet** torch model (Release 49; MIT, inputs
+#                              256x128, embeddings 512-dim); a ``*.onnx`` file
+#                              is loaded through onnxruntime with the same
+#                              OSNet preprocessing.  Empty/"" or unloadable =
+#                              built-in lightweight appearance descriptor
+#                              (histogram + spatial grid + edge/silhouette;
+#                              CPU-cheap, license-free).  A model file is NEVER
+#                              downloaded automatically -- supply it locally.
+#   CCTV_REID_CADENCE          Extract appearance embeddings every N processed
+#                              cycles per camera; never < 1.
+#   CCTV_REID_IMGSZ            Crop size for the built-in descriptor.
+#   CCTV_REID_STRONG_THRESHOLD Minimum cosine similarity for a STRONG match.
+#   CCTV_REID_MARGIN_MIN       Margin over the second-best employee required
+#                              for a STRONG match (ambiguity guard).
+#   CCTV_REID_ADOPT            Consecutive STRONG appearance votes required to
+#                              adopt a candidate identity on an unresolved
+#                              track.
+#   CCTV_REID_EMBEDDING_DIM    Built-in descriptor embedding dimension (an
+#                              OSNet torch path always uses its trained 512).
+#   CCTV_REID_GATE_RESOLVED    OPT-IN event-driven cadence (default 0 = off).
+#                              When on, the appearance pass skips person boxes
+#                              that overlap a spatial track already resolved to
+#                              a face/trusted identity in the previous cycle --
+#                              those tracks cannot be changed by appearance
+#                              votes, so their inference is pure waste.  Kept
+#                              OFF by default because the real-camera latency
+#                              measurements that justify it are still pending.
+REID_ENABLED = os.getenv("CCTV_REID_ENABLED", "1") == "1"
+REID_MODEL_PATH = os.getenv("CCTV_REID_MODEL_PATH", "").strip()
+REID_CADENCE = int(os.getenv("CCTV_REID_CADENCE", "3"))
+REID_IMGSZ = int(os.getenv("CCTV_REID_IMGSZ", "128"))
+REID_STRONG_THRESHOLD = float(os.getenv("CCTV_REID_STRONG_THRESHOLD", "0.90"))
+REID_MARGIN_MIN = float(os.getenv("CCTV_REID_MARGIN_MIN", "0.06"))
+REID_ADOPT_FRAMES = int(os.getenv("CCTV_REID_ADOPT", "5"))
+REID_EMBEDDING_DIM = int(os.getenv("CCTV_REID_DIM", "256"))
+REID_GATE_RESOLVED = os.getenv("CCTV_REID_GATE_RESOLVED", "0") == "1"
+#: Minimum IoU for a person box to count as "covered" by a resolved track box
+#: when ``CCTV_REID_GATE_RESOLVED=1``.
+REID_GATE_IOU = 0.30
+# Enrollment images: full-body / side-pose appearance samples per employee
+# (``data/reid/EMP001.jpg``, ``EMP001_2.jpg`` ...).  If this directory has no
+# images the registry falls back to the face-enrollment images
+# (``data/faces``) so the feature works out of the box; only compressed
+# embeddings are cached/stored -- never raw person images.
+REID_DIR = str(PROJECT_ROOT / "data" / "reid")
+APPEARANCE_EMBEDDINGS_FILE = str(PROJECT_ROOT / "data" / "appearance.pkl")
 
 # ============================================================
 # TRACKER
@@ -194,6 +366,16 @@ IDENTITY_STABILITY_FRAMES = 3
 # consider them absent rather than just "camera missed a frame".  This
 # is *not* the same as the AWAY smoothing -- it guards between-batch gaps.
 PRESENCE_PATIENCE_SEC = 8.0
+
+# ------------------------------------------------------------
+# WALL-CLOCK STATE THRESHOLDS  (Phase 41)
+# Employee presence/FSM transitions must follow real elapsed seconds, not
+# frame counts -- the pipeline is CPU-bound and FPS varies widely.
+AWAY_AFTER_SEC = float(os.getenv("CCTV_AWAY_AFTER_SEC", "3.0"))
+PHONE_AFTER_SEC = float(os.getenv("CCTV_PHONE_AFTER_SEC", "5.0"))
+# A phone-use run keeps counting across brief detection gaps shorter than
+# this (single missed frames must not reset the episode timer).
+PHONE_GAP_GRACE_SEC = float(os.getenv("CCTV_PHONE_GAP_GRACE_SEC", "2.0"))
 
 # ============================================================
 # CAMERA SELECTION MODE  (Phase A -- EXPLICIT vs AUTO)
@@ -408,6 +590,13 @@ RETENTION_DAYS = int(os.getenv("CCTV_RETENTION_DAYS", "365"))
 RETENTION_DAYS_LOGS = int(os.getenv("CCTV_RETENTION_LOGS_DAYS", "365"))
 RETENTION_DAYS_REPORTS = int(os.getenv("CCTV_RETENTION_REPORTS_DAYS", "365"))
 ENABLE_RETENTION = os.getenv("CCTV_ENABLE_RETENTION", "0") == "1"
+# Phase 54 -- privacy (M06).  Rebuildable biometric caches
+# (``data/embeddings.pkl``, ``data/appearance.pkl``) are pruned only when
+# BOTH ``CCTV_ENABLE_RETENTION=1`` AND this window is > 0.  The enrollment
+# images under ``data/faces/`` / ``data/reid/`` are the source of truth and are
+# NEVER deleted by retention -- only the derived mean-embedding caches aged
+# beyond the window are removed (they can be rebuilt from images).
+RETENTION_DAYS_BIOMETRICS = int(os.getenv("CCTV_RETENTION_BIOMETRICS_DAYS", "0"))
 
 # ============================================================
 # DASHBOARD  (Phases 9/10/11)
@@ -578,8 +767,17 @@ def validate_config(quiet: bool = True) -> list[str]:
         problems.append(f"CCTV_MAX_BATCH_SIZE must be >= 1 (got {MAX_BATCH_SIZE})")
     if TARGET_FPS_PER_CAMERA < 0:
         problems.append(f"CCTV_TARGET_FPS must be >= 0 (got {TARGET_FPS_PER_CAMERA})")
+    if LOCAL_SOURCE_DEFAULT_TARGET_FPS < 1:
+        problems.append("CCTV_LOCAL_TARGET_FPS must be >= 1 "
+                        f"(got {LOCAL_SOURCE_DEFAULT_TARGET_FPS})")
     if SMOOTHING_BUFFER_SEC < 0:
         problems.append(f"SMOOTHING_BUFFER_SEC must be >= 0 (got {SMOOTHING_BUFFER_SEC})")
+    if AWAY_AFTER_SEC < 0:
+        problems.append(f"CCTV_AWAY_AFTER_SEC must be >= 0 (got {AWAY_AFTER_SEC})")
+    if PHONE_AFTER_SEC < 0:
+        problems.append(f"CCTV_PHONE_AFTER_SEC must be >= 0 (got {PHONE_AFTER_SEC})")
+    if PHONE_GAP_GRACE_SEC < 0:
+        problems.append(f"CCTV_PHONE_GAP_GRACE_SEC must be >= 0 (got {PHONE_GAP_GRACE_SEC})")
     if FRAME_STALE_SEC <= 0:
         problems.append(f"CCTV_FRAME_STALE_SEC must be > 0 (got {FRAME_STALE_SEC})")
     if STARTUP_FRAME_WAIT_SEC < 0:
@@ -656,6 +854,13 @@ def validate_config(quiet: bool = True) -> list[str]:
         problems.append(f"CCTV_CONF_THRESHOLD must be in [0.0, 1.0] (got {CONF_THRESHOLD})")
     if _pct("FACE", FACE_SIMILARITY_THRESHOLD):
         problems.append(f"CCTV_FACE_THRESHOLD must be in [0.0, 1.0] (got {FACE_SIMILARITY_THRESHOLD})")
+    if not (0.0 <= FACE_CANDIDATE_THRESHOLD <= FACE_SIMILARITY_THRESHOLD):
+        problems.append(
+            "CCTV_FACE_CANDIDATE_THRESHOLD must be in "
+            f"[0.0, FACE_SIMILARITY_THRESHOLD={FACE_SIMILARITY_THRESHOLD}] "
+            f"(got {FACE_CANDIDATE_THRESHOLD})")
+    if FACE_MARGIN_MIN < 0:
+        problems.append(f"CCTV_FACE_MARGIN_MIN must be >= 0 (got {FACE_MARGIN_MIN})")
     if CROWD_THRESHOLD < 1:
         problems.append(f"CCTV_CROWD_THRESHOLD must be >= 1 (got {CROWD_THRESHOLD})")
     if EVIDENCE_RETENTION_DAYS < 0:
@@ -686,6 +891,31 @@ def validate_config(quiet: bool = True) -> list[str]:
             "CCTV_DASH_FAIL_CLOSED=1 requires a dashboard password "
             "(CCTV_DASH_PASS / CCTV_DASH_VIEWER_PASS); dashboard is blocked")
 
+    # Phase 44 -- dedicated phone pass + person ReID settings
+    if PHONE_IMGSZ < 32:
+        problems.append(f"CCTV_PHONE_IMGSZ must be >= 32 (got {PHONE_IMGSZ})")
+    if PHONE_DETECT_CADENCE < 1:
+        problems.append(
+            f"CCTV_PHONE_DETECT_CADENCE must be >= 1 (got {PHONE_DETECT_CADENCE})")
+    if PHONE_EVIDENCE_WINDOW < 1 or PHONE_EVIDENCE_MIN < 1:
+        problems.append("CCTV_PHONE_EVIDENCE_WINDOW/MIN must be >= 1")
+    if PHONE_EVIDENCE_MIN > PHONE_EVIDENCE_WINDOW:
+        problems.append("CCTV_PHONE_EVIDENCE_MIN must be <= CCTV_PHONE_EVIDENCE_WINDOW")
+    if REID_CADENCE < 1:
+        problems.append(f"CCTV_REID_CADENCE must be >= 1 (got {REID_CADENCE})")
+    if REID_IMGSZ < 16:
+        problems.append(f"CCTV_REID_IMGSZ must be >= 16 (got {REID_IMGSZ})")
+    if not (0.0 <= REID_STRONG_THRESHOLD <= 1.0):
+        problems.append(
+            f"CCTV_REID_STRONG_THRESHOLD must be in [0,1] (got {REID_STRONG_THRESHOLD})")
+    if REID_MARGIN_MIN < 0:
+        problems.append(f"CCTV_REID_MARGIN_MIN must be >= 0 (got {REID_MARGIN_MIN})")
+    if REID_ADOPT_FRAMES < 1:
+        problems.append(f"CCTV_REID_ADOPT must be >= 1 (got {REID_ADOPT_FRAMES})")
+    if not (0.0 < REID_GATE_IOU <= 1.0):
+        problems.append(
+            f"CCTV_REID_GATE_IOU must be in (0,1] (got {REID_GATE_IOU})")
+
     for p in problems:
         log("CONFIG: %s", p)
     return problems
@@ -706,6 +936,8 @@ def runtime_config_snapshot() -> dict:
         "evidence_retention_days": EVIDENCE_RETENTION_DAYS,
         "correlation_window_sec": CORRELATION_WINDOW_SEC,
         "temporal_repeat_threshold": TEMPORAL_REPEAT_THRESHOLD,
+        "face_candidate_threshold": FACE_CANDIDATE_THRESHOLD,
+        "face_margin_min": FACE_MARGIN_MIN,
         "temporal_escalate_count": TEMPORAL_ESCALATE_COUNT,
         "temporal_silence_days": TEMPORAL_SILENCE_DAYS,
         "anomaly_min_samples": ANOMALY_MIN_SAMPLES,
@@ -724,4 +956,5 @@ def runtime_config_snapshot() -> dict:
         "unknown_mode": SECURITY_UNKNOWN_MODE,
         "alerts_cooldown_sec": ALERT_COOLDOWN_SEC,
         "retention_days": RETENTION_DAYS,
+        "retention_days_biometrics": RETENTION_DAYS_BIOMETRICS,
     }

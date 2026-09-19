@@ -290,11 +290,17 @@ def test_dedup_same_employee_across_cameras_single_tracker(fake_clock, recorder)
 
 
 def test_unknown_tracked_separately_never_an_employee(fake_clock, recorder):
+    """An Unknown/unmatched box never spawns an employee (Phase 41 req 8)."""
     mt = T.MultiTracker(None)
-    mt.process_batch([{"emp_id": "Unknown", "present": True}],
-                     camera_online=True)
-    assert mt.employee_ids == ["Unknown"]
-    assert mt.live_state("Unknown") == "ACTIVE"
+    mt.process_batch([{"emp_id": "Unknown", "present": True,
+                       "person_present": True}], camera_online=True)
+    assert mt.employee_ids == []
+    assert mt.live_state("Unknown") is None
+    # The same batch still tracks a real employee independently.
+    mt.process_batch([{"emp_id": "Unknown", "present": True},
+                      {"emp_id": "EMP001", "present": True}], camera_online=True)
+    assert mt.employee_ids == ["EMP001"]
+    assert mt.live_state("EMP001") == "ACTIVE"
 
 
 # ======================================================================

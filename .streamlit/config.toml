@@ -1,0 +1,58 @@
+# =============================================================================
+# AI CCTV INTELLIGENCE - Security Operations Center dashboard theme
+# Premium enterprise SOC dark theme (Phase 42).
+#
+# Palette is deliberately restrained: near-black blue-gray surfaces, one calm
+# blue accent, quiet borders. No neon, no gradients, no glassmorphism.
+# =============================================================================
+
+[theme]
+base = "dark"
+
+# Surfaces -------------------------------------------------------------
+backgroundColor            = "#081d52"
+secondaryBackgroundColor   = "#111827"
+textColor                  = "#E6EDF7"
+borderColor                = "#1E2A40"
+baseRadius                 = 0.45
+showSidebarBorder          = true
+showWidgetBorder           = true
+
+# Accent ---------------------------------------------------------------
+primaryColor               = "#497bf1"
+
+# Semantic status tones (red reserved for real failures / high incidents) -
+greenColor                 = "#3ECF8E"
+greenBackgroundColor       = "#0E271D"
+greenTextColor             = "#9BE8C4"
+orangeColor                = "#F0A35E"
+orangeBackgroundColor      = "#291E11"
+orangeTextColor            = "#F6C794"
+redColor                   = "#E5534B"
+redBackgroundColor         = "#2A1412"
+redTextColor               = "#F0A39B"
+grayColor                  = "#8B96A8"
+grayBackgroundColor        = "#151D2B"
+grayTextColor              = "#B7C0CE"
+violetColor                = "#A98BF4"
+violetBackgroundColor      = "#201628"
+violetTextColor            = "#CDBCF7"
+
+# Typography ------------------------------------------------------------
+font                       = "sans-serif"
+headingFontSizes           = ["1.5rem", "1.25rem", "1.1rem", "1rem"]
+metricValueFontSize        = "1.65rem"
+metricValueFontWeight      = 700
+
+# Charts ----------------------------------------------------------------
+chartCategoricalColors     = ["#4C7DF0", "#3ECF8E", "#F0A35E", "#A98BF4",
+                              "#E5534B", "#5FD0E0"]
+chartSequentialColors      = ["#0F2233", "#14354F", "#1C4A70"]
+chartDivergingColors       = ["#E5534B", "#E6EDF7", "#3ECF8E"]
+
+[server]
+headless = true
+maxUploadSize = 100
+
+[browser]
+gatherUsageStats = false

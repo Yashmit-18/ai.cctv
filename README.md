@@ -71,11 +71,18 @@ management with face enrollment, and report downloads.
 | Phase 34 SOC/office intelligence: incident reconstruction (T±30s window), person/identity continuity (first/last seen, dwell, zone transitions, cross-camera path), advanced event-context rollup (`CORRELATED_SECURITY_INCIDENT (REQUIRES_HUMAN_REVIEW)`), SOC operator attention queue, adaptive time-of-day baselines (hour/day-of-week + `INSUFFICIENT_DATA` guard), extended explainable incident risk context factors (zone/after-hours/evidence/confidence), config snapshot with Phase 34 tunables | **VERIFIED NOW** (pure-python tests + integration smoke) |
 | Phase 35 production reliability & recovery: daemon-level failure isolation (detector/security/main-loop exceptions never crash the run, degraded no-detector retry mode), opt-in automatic daily backup (`CCTV_AUTO_BACKUP_DAILY`), WAL-safe backup **restore** (`restore_database`/`restore_to_temp`), wired security+evidence retention (opt-in, incidents never auto-purged), idempotent incident-risk/event-link writes, extended `validate_config` (threshold ranges, retention >= 0, camera URL, SMTP) | **VERIFIED NOW** (pure-python tests + live webcam smoke + backup/restore drill + secret audit) |
 | Phase 36 virtual office simulation & stress: deterministic seeded office scenarios (A–R), opt-in virtual cameras with independent FPS/resolution/scene/fault state, camera failure/recovery + frozen/dark/bright/noisy/disconnect, multi-camera (1/2/3; pool guard to N), cross-camera continuity, fault injection (detector/alert/camera — never in production), structured machine-readable reports with real latency p50/p95/p99, resource limits (max cameras/fps/steps/evidence/workers) | **VERIFIED NOW** (simulation/stress/soak pytest markers + real webcam regression preserved). **Simulated ≠ real RTSP** |
-| Phase 37 controlled advisory-pilot readiness: client-environment **pre-flight check** (`python -m src.preflight`, system/GPU/camera/models/DB/evidence/SMTP/Docker/security/config/pilot), **RTSP validation harness** (`python -m src.rtsp_harness`) with credential redaction, opt-in **pilot mode** (`CCTV_PILOT_MODE=1`) + operational health logging (never disables security/RBAC/audit or enables continuous recording), failure/recovery + deployment-validation tests, and credential hardening (explicit `CHANGE_ME` markers, no real-looking defaults) | **VERIFIED NOW** (564-test suite incl. 79 Phase 37 tests + preflight/RTSP-harness smoke). Real RTSP/GPU/SMTP/Docker reported honestly as `NOT EXECUTED — ENVIRONMENT LIMITATION` |
-| Phase 38 website/deployment validation: **website as first-class component** — Security-tab Severity/Status filters wired to `query_security_events`/`EventStore.events`; incident Resolve/Dismiss backend-authoritative via `AccessGuard` (audited viewer denial; `resolve_incident` `TypeError` fixed); Camera Health `Configured` column (no RTSP/password leak); **Deploy & System Check** tab rendering honest `src.preflight` status + read-only deployment checklist; 9-tab AppTest rendering with no secret leakage; pagination + backup/restore/retention invariants | **VERIFIED NOW** (585-test suite incl. 21 Phase 38 tests + preflight smoke). Real RTSP/GPU/SMTP/Docker still reported honestly as `NOT EXECUTED — ENVIRONMENT LIMITATION` |
-| Phase 39 critical-defect remediation & production hardening: dashboard auth **fail-closed** (`CCTV_DASH_FAIL_CLOSED` + preflight FAIL), **session expiry** (`CCTV_DASH_SESSION_MINUTES`, default 15m), gender-agnostic **LEFT/departure emission** from last-seen expiry, evidence capture honoring OFF/HIGH_SEVERITY_ONLY/EVENT_ONLY, risk-panel LEFT JOIN, incident acknowledge/dismiss RBAC + single-audit, employee mutation RBAC + audit + path sanitization, biometric-at-rest WARN, `.dockerignore`, per-record evidence retention, `localtime` timezone normalization, grace/break knobs surfaced, `-W error` clean | **VERIFIED NOW** (595-test suite incl. 10 Phase 39 regression tests, full green under `-W error`). Real RTSP/GPU/SMTP/Docker still reported honestly as `NOT EXECUTED — ENVIRONMENT LIMITATION` |
-| Phase A/B core vision & security intelligence: **per-person** detection entries (`person_box`/`person_conf`) with legacy presence kept, **spatial person tracking** (`Track`/`SpatialTracker`: track_id, IoU association, EMA bbox, trajectory, first/last-seen), **flicker-free track identity voting** (adopt-after-3 / never-demote / switch-after-3), **phone→track→employee** attribution + per-track phone duration, **frame motion detection** (advisory only, `MOTION_DETECTED` + `motion_events`), **virtual-line entry/exit crossings** (`VirtualLine`/`EntryExitDetector` → `ENTRY_CROSSING`/`EXIT_CROSSING` + `entry_exit_events`), **LEFT emitted from exit-crossing** with `LEFT_DEBOUNCE_SEC`, opt-in **UNEXPECTED_STAY**, **`INTRUSION_COOLDOWN_SEC` actually wired**, per-zone **capacity**, **FROZEN_FRAME/LOW_FPS** camera health states, **`CAMERA_MODE`** + dashboard camera-selection, registry capability vocabulary (**AVAILABLE/DISABLED/DEGRADED/NOT_CONFIGURED/FUTURE_MODEL_REQUIRED**) + "🤖 AI Capabilities" tab (10-tab dashboard). Multi-person robustness: **N-persons → N independent person/track entries, N-faces → N independent identities** (never first-face-only), **face→person pairing by face centre + nearest person centroid**, **per-person phone attribution**, **blank/dark or dead camera freezes employee state — never fabricates AWAY**, **FROZEN_FRAME-but-flowing stays monitored**, security engine treats **FROZEN/NO_FRAME as offline** (failsafe, `LOW_FPS` stays online), **structured `CAMERA_DEBUG`** loop diagnostics, live table row for **Unknown person** + dashboard distinguishes **dead/blank vs frozen** camera | **VERIFIED NOW** (744-test suite incl. 54 Phase A/B + 30 multi-person/camera-honesty regression tests + 5 real-feed FROZEN_FRAME camera-health tests + live webcam session showing EMP001 + Unknown active simultaneously; see `GAP_ANALYSIS_PHASE_AB.md` §5). Two-roster-employee simultaneous recognition (EMP002/EMP003 still `NO_FACE`) + DroidCam honestly `NOT EXECUTED — ENVIRONMENT LIMITATION` |
+| Phase 37 controlled advisory-pilot readiness: client-environment **pre-flight check** (`python -m src.preflight`, system/GPU/camera/models/DB/evidence/SMTP/Docker/security/config/pilot), **RTSP validation harness** (`python -m src.rtsp_harness`) with credential redaction, opt-in **pilot mode** (`CCTV_PILOT_MODE=1`) + operational health logging (never disables security/RBAC/audit or enables continuous recording), failure/recovery + deployment-validation tests, and credential hardening (explicit `CHANGE_ME` markers, no real-looking defaults) | **VERIFIED NOW** (1075-test suite incl. 79 Phase 37 tests + preflight/RTSP-harness smoke). Real RTSP/GPU/SMTP/Docker reported honestly as `NOT EXECUTED — ENVIRONMENT LIMITATION` |
+| Phase 38 website/deployment validation: **website as first-class component** — Security-tab Severity/Status filters wired to `query_security_events`/`EventStore.events`; incident Resolve/Dismiss backend-authoritative via `AccessGuard` (audited viewer denial; `resolve_incident` `TypeError` fixed); Camera Health `Configured` column (no RTSP/password leak); **Deploy & System Check** tab rendering honest `src.preflight` status + read-only deployment checklist; 9-tab AppTest rendering with no secret leakage; pagination + backup/restore/retention invariants | **VERIFIED NOW** (1075-test suite incl. 21 Phase 38 tests + preflight smoke). Real RTSP/GPU/SMTP/Docker still reported honestly as `NOT EXECUTED — ENVIRONMENT LIMITATION` |
+| Phase 39 critical-defect remediation & production hardening: dashboard auth **fail-closed** (`CCTV_DASH_FAIL_CLOSED` + preflight FAIL), **session expiry** (`CCTV_DASH_SESSION_MINUTES`, default 15m), gender-agnostic **LEFT/departure emission** from last-seen expiry, evidence capture honoring OFF/HIGH_SEVERITY_ONLY/EVENT_ONLY, risk-panel LEFT JOIN, incident acknowledge/dismiss RBAC + single-audit, employee mutation RBAC + audit + path sanitization, biometric-at-rest WARN, `.dockerignore`, per-record evidence retention, `localtime` timezone normalization, grace/break knobs surfaced, `-W error` clean | **VERIFIED NOW** (1075-test suite incl. 10 Phase 39 regression tests, full green under `-W error`). Real RTSP/GPU/SMTP/Docker still reported honestly as `NOT EXECUTED — ENVIRONMENT LIMITATION` |
+| Phases 40–48 pipeline realism & honesty upgrades: Phase 40–42 detection/pipeline refinements (single-source FPS cap, cadence budget), Phase 43 **per-person + face/phone/ReID cadence** layers with opt-in `PIPELINE_TIMING`/`PHONE_DIAG` diagnostics, Phase 44/44A/44B dedicated **phone pass** (class-67, `PHONE_IMGSZ=1280`, cadence, per-track evidence hysteresis) + wall-clock **ON_PHONE/AWAY FSM** (`PHONE_AFTER_SEC`, `AWAY_AFTER_SEC`, gap grace), Phase 45 single-source realism/tuning (`effective_target_fps`), Phase 46 YOLO11n default upgrade + research benchmark, Phase 47 validation-protocol report (tree-absent), Phase 48 first real-camera validation attempt (index 0 yielded black/frozen frames only — ENV BLOCKED). YOLO person/phone accuracy remains **NOT VALIDATED** (no frame-labelled real dataset); see `PROJECT_FULL_SYSTEM_AUDIT_2026-09-19.md` | **CODE VERIFIED** (suite regression + bench JSON; real-camera accuracy NOT VALIDATED) |
+| Phase A/B core vision & security intelligence: **per-person** detection entries (`person_box`/`person_conf`) with legacy presence kept, **spatial person tracking** (`Track`/`SpatialTracker`: track_id, IoU association, EMA bbox, trajectory, first/last-seen), **flicker-free track identity voting** (adopt-after-3 / never-demote / switch-after-3), **phone→track→employee** attribution + per-track phone duration, **frame motion detection** (advisory only, `MOTION_DETECTED` + `motion_events`), **virtual-line entry/exit crossings** (`VirtualLine`/`EntryExitDetector` → `ENTRY_CROSSING`/`EXIT_CROSSING` + `entry_exit_events`), **LEFT emitted from exit-crossing** with `LEFT_DEBOUNCE_SEC`, opt-in **UNEXPECTED_STAY**, **`INTRUSION_COOLDOWN_SEC` actually wired**, per-zone **capacity**, **FROZEN_FRAME/LOW_FPS** camera health states, **`CAMERA_MODE`** + dashboard camera-selection, registry capability vocabulary (**AVAILABLE/DISABLED/DEGRADED/NOT_CONFIGURED/FUTURE_MODEL_REQUIRED**) + "🤖 AI Capabilities" tab (10-tab dashboard). Multi-person robustness: **N-persons → N independent person/track entries, N-faces → N independent identities** (never first-face-only), **face→person pairing by face centre + nearest person centroid**, **per-person phone attribution**, **blank/dark or dead camera freezes employee state — never fabricates AWAY**, **FROZEN_FRAME-but-flowing stays monitored**, security engine treats **FROZEN/NO_FRAME as offline** (failsafe, `LOW_FPS` stays online), **structured `CAMERA_DEBUG`** loop diagnostics, live table row for **Unknown person** + dashboard distinguishes **dead/blank vs frozen** camera | **VERIFIED NOW** (1075-test suite incl. 54 Phase A/B + 30 multi-person/camera-honesty regression tests + 5 real-feed FROZEN_FRAME camera-health tests + live webcam session showing EMP001 + Unknown active simultaneously; see `GAP_ANALYSIS_PHASE_AB.md` §5). Two-roster-employee simultaneous recognition (EMP002/EMP003 still `NO_FACE`) + DroidCam honestly `NOT EXECUTED — ENVIRONMENT LIMITATION` |
 | Phone-use classification (`ON_PHONE`) | **DOCUMENTED LIMITATION** (YOLOv8n sensitivity; see [Known limitations](#known-limitations)) |
+| Phase 49 genuine person-ReID upgrade: vendored **OSNet** family (vanilla + AIN, MSMT17-trained, MIT), opt-in via `CCTV_REID_MODEL_PATH` → `models/osnet_x1_0_msmt17.pth` (or `osnet_x0_5` / `osnet_ain_x1_0`), 512-dim embeddings + torchreid preprocessing (256×128, ImageNet mean/std), dim-aware appearance-cache invalidation (`CACHE_VERSION=2`), zero behaviour change at default settings, opt-in event-driven ReID cadence (`CCTV_REID_GATE_RESOLVED=1` skips appearance inference on face-resolved person boxes) | **CODE VERIFIED / SIMULATED** (`data/phase49_benchmark.json`: CPU latency/params + similarity separation on synthetic crops; 1075-test suite green under `-W error`). Real-camera threshold calibration **NOT VALIDATED** — production default unchanged, OSNet remains opt-in |
+| Phase 50 real-camera ReID calibration preparation: offline **threshold/margin calibration tool** (`python -m src.calibration`, labelled-crop scanning, pose dedup, same/diff cosine distributions, best-vs-second margins, operating-point scan, honest `eligible=False` refusal under FAR+FRR caps — **never mutates config**), **production gate** (5 hard prerequisites before any OSNet production use), identity-safety regression suite, real-camera **feed gate** (bright/changing/FPS), and **side/back + phone validation protocols** (`PHASE50_VALIDATION_PROTOCOLS_2026-09-19.md` — **tree-absent**, see `PROJECT_FULL_SYSTEM_AUDIT_2026-09-19.md` §23/§24) | **CODE VERIFIED** (30 new Phase 50 tests; suite **1075 passed** under `-W error`). Thresholds, OSNet production use, and live protocols **NOT VALIDATED / NOT EXECUTED** (no usable camera feed; EMP003/Piyush unavailable) — production default unchanged, OSNet remains opt-in |
+| Phase 51 calibration-tool hardening & validation harness: **data-integrity scanner** (roster-missing, empty pose dirs, corrupt/unreadable crops reported **per-path** — nothing silently dropped; unsupported files; pixel-identical **cross-employee + cross-pose dedup**; per-size `image_sizes` census; deterministic dataset fingerprint), **manifest-gated provenance** (`REAL LABELED DATA` now requires a validated `manifest.json` — SIMULATED artifacts and bare PNG folders can never be REAL), recommender **hard guards** (refuse `eligible=False` with explicit reason on no-data / single-employee / sample-shortage / dead–confusable / zero-norm inputs — never a silent closest-point pick; 13 fixtures A–M), **provenance-forcing production gate** (synthetic dry-run report can never satisfy `real_calibration_data`), hardened **feed gate** (frozen-tail/majority-change detection, min frames, ≥15 FPS) + **validation-runner choke point** (`NOT EXECUTED / INVALID FEED` — cameras that open while black/frozen are not evidence), **fail-closed model identity** (`checkpoint`/`model_variant` recorded; a requested checkpoint that fails to load aborts with exit 1 — no silent fallback, no variant mislabel), Phase 51 report | **CODE VERIFIED / SIMULATED** (75 new tests; suite **1075 passed** under `-W error`). Does **NOT** enable OSNet, calibrate thresholds, or validate side/back/phone on a live feed — those stay **NOT VALIDATED / NOT EXECUTED** (no usable camera feed). Production default unchanged, OSNet remains opt-in |
+| Phase 52 real-camera validation execution: fed the only device that opens (index 0, MSMF) through the Phase 51 feed gate — **every frame black/frozen** (median brightness `4.12/255`, frame change `0.0`, gate verdict `NOT EXECUTED / INVALID FEED`). Real validation **STOPPED at the preflight choke point**; no manifest, no employee captures, no scenarios, no thresholds changed; OSNet untouched | **REAL VERIFIED (failure event)** — the black/frozen feed and its correct rejection were observed twice. All live scenarios remain **NOT EXECUTED / NOT VALIDATED** (blocked: no usable feed, no rostered employee). See `PHASE52_REAL_CAMERA_VALIDATION_REPORT_2026-09-19.md` |
+| Phase 53 full-system audit (zero-change read-only pass): every module/config/test/doc examined; invariant CODE VERIFICATION + full suite double-run; live DB/SQLite inspected; deployment/auth/docs gaps catalogued as M01–M20 | **AUDIT ONLY** — see `PROJECT_FULL_SYSTEM_AUDIT_2026-09-19.md` |
+| Phase 54 defensive remediation (audit-derived): **M01** docker dashboard secure-by-default (`CCTV_DASH_AUTH=1`, `CCTV_DASH_FAIL_CLOSED=1` forwarded, 30-min session); **M02** live-state writer logs failures (rate-limited) + recovery instead of silent swallow; **M03** model preflight remedy + ONNX provider check; **M04** ReID fallback transparency (`requested_model`/`load_error` surfaced); **M05** INFO-advisory incident auto-close on `CAMERA_RECOVERED` + anomaly `REPEATED_PATTERN` cooldown dedup (24 h); **M06** opt-in biometric-cache retention (`CCTV_RETENTION_BIOMETRICS_DAYS`, enrolment images never touched); **M07** report/EOD continuity reconcile (no phantom `report_generated`) | **CODE VERIFIED** (27 new Phase 54 regression tests; suite **1075 passed** under `-W error`). Real live feed / SMTP / Docker run remain **NOT EXECUTED** (environment) |
 | Real RTSP camera pool | **REQUIRES CLIENT ENVIRONMENT** (validated by tests/simulation only) |
 | GPU (CUDA) batched inference | **REQUIRES CLIENT ENVIRONMENT** (needs NVIDIA GPU + drivers) |
 | SMTP email delivery | **REQUIRES CLIENT ENVIRONMENT** (needs real SMTP credentials) |
@@ -177,7 +184,7 @@ Given one or more camera feeds, the system:
   history by itself.
 - **Docker + Compose** deployment with healthchecks, non-root runtime, GPU
   passthrough, and graceful-stop guarantees.
-- **Automated test suite** — **564 pytest tests** (pure/logic level, no GPU,
+- **Automated test suite** — **1075 pytest tests** (pure/logic level, no GPU,
   camera, SMTP, or enrollment images needed), covering the Phase 30 productivity
   core, the Phase 31 security layer, and the Phase 32 intelligence/hardening
   layer (correlation, investigation, evidence/alert hardening, search, camera
@@ -259,7 +266,7 @@ cctv monitoring/
 ├── Dockerfile                   # Container image (CUDA or CPU base, non-root)
 ├── docker-compose.yml           # Two services (ai_daemon + web_dashboard) + healthchecks
 ├── models/
-│   └── yolov8n.pt               # YOLOv8n weights (person / cell phone detection)
+│   └── yolo11n.pt               # YOLO11n weights (person / cell phone detection)
 │
 ├── data/                        # Runtime data (persists across restarts / containers)
 │   ├── database/
@@ -273,7 +280,7 @@ cctv monitoring/
 │   ├── eod_state.json           # EOD scheduler duplicate-prevention marker
 │   └── logs/app.log             # Rollover application log
 │
-├── tests/                       # pytest suite (744 green on 2026-09-09)
+├── tests/                       # pytest suite (1075 green)
 │   ├── conftest.py                     # fixtures (isolated DB, config env)
 │   ├── test_productivity.py            # working-window scoring, midnight splits
 │   ├── test_analytics.py               # Unknown filtering, day/range metrics
@@ -359,7 +366,7 @@ cctv monitoring/
 | Layer | Technology |
 |-------|-----------|
 | Language | Python **3.10 / 3.11 / 3.12** (3.12 recommended; 3.13+ unsupported) |
-| Object detection | PyTorch + Ultralytics **YOLOv8** (`yolov8n.pt`) — classes `[0=person, 67=cell phone]` |
+| Object detection | PyTorch + Ultralytics **YOLO11** (`yolo11n.pt`) — classes `[0=person, 67=cell phone]` |
 | Face recognition | **insightface** (`buffalo_l`) + ONNX Runtime + scikit-learn cosine similarity |
 | Vision plumbing | OpenCV (`opencv-python`) |
 | Storage | SQLite (WAL mode) |
@@ -562,7 +569,9 @@ modifies or accelerates productivity/employee data.
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
-| `MODEL_PATH` | `models/yolov8n.pt` | YOLOv8 weights |
+| `MODEL_PATH` | `models/yolo11n.pt` | YOLO11n weights |
+| `CCTV_REID_MODEL_PATH` | *(empty)* | Trained person-ReID model. `.pth`/`.pt` → torch **OSNet** (512-dim, 256×128 preprocessing); `.onnx` → OSNet-style ONNX. Empty/unloadable → built-in descriptor (never crashes, never auto-downloads). |
+| `CCTV_REID_GATE_RESOLVED` | `0` | **OPT-IN** event-driven cadence: `1` skips appearance inference for person boxes overlapping face-resolved tracks from the previous cycle (`CCTV_REID_GATE_IOU`, default `0.30`). |
 | `CONF_THRESHOLD` / `FRAME_SKIP` | `0.4` / `10` | YOLO confidence / frame sampling |
 | `FACE_MODEL` | `buffalo_l` | insightface model pack |
 | `FACE_SIMILARITY_THRESHOLD` | `0.6` | cosine-similarity pass/fail |
@@ -994,7 +1003,7 @@ docker compose build --build-arg BASE_IMAGE=python:3.10-slim
 | Graceful shutdown (flush + final report + DB checkpoint) | repeated Ctrl+C runs, integrity `ok` |
 | WAL-safe concurrent read (daemon writes / dashboard reads) | Phase 29 fix: `PRAGMA query_only=ON`, regression test |
 | Config validation, secret redaction, env/secrets handling | `--validate-config`, audit |
-| Full automated test suite | **161 pytest tests pass** |
+| Full automated test suite | **1075 pytest tests pass** |
 | Face enrollment workflow (files → registry → DB sync) | status-test suite |
 
 ### REQUIRES CLIENT ENVIRONMENT (future deployment)
@@ -1085,7 +1094,14 @@ a Docker host — requires client infrastructure.**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-# expected: 564 passed, no warnings
+# expected: 1075 passed, no warnings
+```
+
+The suite also runs clean under `-W error` (warnings treated as errors):
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q -W error
+# expected: 1075 passed
 ```
 
 The suite is pure/logic-level and does **not** require a GPU, camera feeds, SMTP,
@@ -1117,6 +1133,39 @@ validation harness**, both runnable directly (see
 A multi-hour **wall-clock** soak, real RTSP camera pools, GPU inference, SMTP
 delivery and Docker runs are **NOT EXECUTED** in this environment — they are
 future client-environment tasks and are never faked.
+
+### Validation-status matrix (honest labeling)
+
+Every capability is labeled with one of the mutually-exclusive statuses below.
+Nothing is inferred or "assumed to work" — an item only climbs a level after the
+corresponding validation actually ran.
+
+| Status | Meaning |
+|---|---|
+| **REAL VERIFIED** | Exercised end-to-end on real hardware/feed in this environment (e.g. live webcam capture + real YOLO/InsightFace inference). |
+| **CODE VERIFIED** | Verified by the automated pytest suite (logic-level), reading real code paths against real/isolated databases. |
+| **SIMULATED** | Verified only against the deterministic virtual-camera / fault-injection simulation layer. |
+| **NOT VALIDATED** | Implemented, covered by code, but the required hardware/environment (RTSP/GPU/SMTP/Docker/long soak/multi-roster-face) was not available to validate here. |
+| **NOT IMPLEMENTED** | Explicitly out of scope / future (\*SUSPECTED\_\* event types, fire/smoke/weapon/etc. classes beyond YOLO person+phone). |
+
+| Capability | Status |
+|---|---|
+| YOLOv8n person + phone detection on live webcam frames | **REAL VERIFIED** (CPU) |
+| InsightFace enrollment + recognition (single-operator webcam) | **REAL VERIFIED** — known + Person/Unknown live; two-or-more simultaneous roster faces | **NOT VALIDATED** (EMP002/EMP003 not enrolled in live runs) |
+| Multi-person detection / identity independence | **CODE VERIFIED** + single real known+unknown live session |
+| Employee FSM (ACTIVE / ON_PHONE / AWAY), camera-offline freeze | **CODE VERIFIED** |
+| Camera reconnect / health / FROZEN_FRAME / LOW_FPS | **REAL VERIFIED** on webcam pixels (FROZEN classification); sustained physical freeze end-to-end | **NOT VALIDATED** |
+| Productivity & analytics scoring (window/lunch/grace/break) | **CODE VERIFIED** |
+| Security engine, incidents, alerts lifecycle/retry/escalation | **CODE VERIFIED** |
+| Evidence capture + SHA-256 + retention | **CODE VERIFIED** |
+| RBAC (admin/viewer, audited denials), dashboard auth fail-closed | **CODE VERIFIED** (incl. 8 auth-regression tests) |
+| Backup / restore / integrity drill | **CODE VERIFIED** (+ local restore drill) |
+| RTSP camera pool / NVR | **NOT VALIDATED** — implemented, validated by tests/simulation only |
+| GPU/CUDA inference | **NOT VALIDATED** — CPU fallback used; GPU requires client hardware |
+| SMTP alert/report delivery | **NOT VALIDATED** — real delivery not exercised; failure paths code-verified |
+| Docker / Compose deployment | **NOT VALIDATED** — no Docker daemon in this environment |
+| Wall-clock soak / long-run stability | **SIMULATED** (bounded fast-simulated-time soak only) |
+| Fire/smoke/weapon/fall/PPE/violence detection | **NOT IMPLEMENTED** — YOLO model is COCO person+phone only; keys/reserved event types exist for a future model, never claimed active |
 
 ---
 

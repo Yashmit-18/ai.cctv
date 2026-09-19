@@ -175,7 +175,7 @@ class AlertEngine:
         db.escalate_alert(self._conn, alert_id)
 
     # ------------------------------------------------------------------
-    # Phase 33 -- incident-level alert intelligence (B5) & health (B6)
+    # Phase 33 -- incident-level alert intelligence (B5) & health (B6) 
     # ------------------------------------------------------------------
 
     def incident_alert(self, incident: dict, *, min_severity: str = "MEDIUM",

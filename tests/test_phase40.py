@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from src.tracker import MultiTracker, AWAY, ACTIVE, ON_PHONE
+from src.tracker import MultiTracker, AWAY, ACTIVE, ON_PHONE, SpatialTracker, Track
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -39,6 +39,31 @@ def _write_live_state(tmp_path, states=None, telemetry=None, sources=None,
     return json.loads(Path(target).read_text(encoding="utf-8"))
 
 
+class _FakeClock:
+    """Deterministic wall clock for tracker FSM tests (Phase 41)."""
+    now = 10_000.0
+
+    @classmethod
+    def time(cls):
+        return cls.now
+
+    @classmethod
+    def strftime(cls, fmt, tt=None):
+        return time.strftime(fmt, tt or time.localtime(cls.now))
+
+    @classmethod
+    def localtime(cls, tt=None):
+        return time.localtime(tt or cls.now)
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    import src.tracker as _T
+    _FakeClock.now = 10_000.0
+    monkeypatch.setattr(_T, "time", _FakeClock)
+    return _FakeClock
+
+
 # ── tracker: multi-employee independence ────────────────────────────────
 
 class TestMultiEmployeeIndependence:
@@ -56,7 +81,7 @@ class TestMultiEmployeeIndependence:
         assert states.get("EMP001") == ACTIVE
         assert states.get("EMP002") == ON_PHONE
 
-    def test_one_emp_absent_other_active(self, tmp_db):
+    def test_one_emp_absent_other_active(self, tmp_db, fake_clock):
         t = MultiTracker(tmp_db)
         dets_both = [
             {"cam": "c1", "emp_id": "EMP001", "phone": False},
@@ -64,14 +89,16 @@ class TestMultiEmployeeIndependence:
         ]
         for _ in range(5):
             t.process_batch(dets_both, True)
+            fake_clock.now += 1
         # Now: only EMP001 visible (send a detection for another emp to
         # keep detections non-empty so the freeze path is not taken).
         dets_only_emp1 = [
             {"cam": "c1", "emp_id": "EMP001", "phone": False},
             {"cam": "c1", "emp_id": "IMPOSTOR", "phone": False},
         ]
-        for _ in range(30):
+        for _ in range(8):
             t.process_batch(dets_only_emp1, True)
+            fake_clock.now += 1
         states = t.live_states()
         assert states.get("EMP001") == ACTIVE
         assert states.get("EMP002") == AWAY
@@ -144,7 +171,7 @@ class TestTrackerSessionDetails:
         states = t.live_states()
         assert states.get("EMP001") == ON_PHONE
 
-    def test_away_when_no_detections_for_other_emp(self, tmp_db, monkeypatch):
+    def test_away_when_no_detections_for_other_emp(self, tmp_db, monkeypatch, fake_clock):
         """EMP001 disappears while other employees remain → AWAY."""
         import src.tracker as T
         monkeypatch.setattr(T, "SMOOTHING_BUFFER_SEC", 0)
@@ -154,10 +181,12 @@ class TestTrackerSessionDetails:
         dets = [{"cam": "c1", "emp_id": "EMP001", "phone": False}]
         for _ in range(5):
             t.process_batch(dets, True)
+            fake_clock.now += 1
         # EMP001 disappears; only OTHER visible
-        for _ in range(20):
+        for _ in range(8):
             t.process_batch(
                 [{"cam": "c1", "emp_id": "OTHER", "phone": False}], True)
+            fake_clock.now += 1
         states = t.live_states()
         assert states.get("EMP001") == AWAY
 
@@ -587,3 +616,248 @@ class TestRegistryRebuildReport:
         status = reg.employee_status()
         assert status.get("EMP001") == "ENROLLED"
         assert status.get("EMP002") == "NO_FACE"
+
+
+# ── Phase 40: numbered Unknown display labels ───────────────────────────
+
+class TestNumberedUnknownLabels:
+    """Per-track numbered ``Unknown N`` display labels.
+
+    The number MUST be owned by the *spatial track* (its lifecycle), never by
+    the detection-array index or per-frame detection order.  The canonical
+    identity always stays ``"Unknown"`` -- ``Unknown N`` is display-only.
+    """
+
+    _FW, _FH = 640, 480
+
+    @staticmethod
+    def _person(cam, box, fw=640, fh=480, conf=0.9):
+        return {"cam": cam, "det_type": "person", "emp_id": "__person__",
+                "person_box": tuple(box), "person_conf": conf,
+                "frame_w": fw, "frame_h": fh}
+
+    @staticmethod
+    def _face(cam, emp_id, face_box, person_box, fw=640, fh=480, score=0.4):
+        return {"cam": cam, "emp_id": emp_id, "face_score": score,
+                "face_box": tuple(face_box), "person_box": tuple(person_box),
+                "frame_w": fw, "frame_h": fh}
+
+    @staticmethod
+    def _label_by_track(snap):
+        return {t["track_id"]: t["identity_label"] for t in snap["tracks"]}
+
+    # -- one unknown ------------------------------------------------
+    def test_one_unknown_becomes_unknown_1(self):
+        st = SpatialTracker(adopt_frames=3)
+        p = self._person("c1", (10, 10, 90, 260))
+        f = self._face("c1", "Unknown", (30, 30, 70, 120), (10, 10, 90, 260))
+        st.process([p, f], now=1000.0)
+        snap = st.snapshot(now=1000.0)
+        assert snap["unknown_count"] == 1
+        assert snap["tracks"][0]["identity_label"] == "Unknown 1"
+        assert snap["tracks"][0]["identity"] == "Unknown"
+
+    # -- multiple simultaneous unknowns ----------------------------
+    def test_multiple_unknowns_get_distinct_labels(self):
+        st = SpatialTracker(max_age_sec=5.0, adopt_frames=3)
+        dets = [
+            self._person("c1", (10, 10, 90, 260)),
+            self._face("c1", "Unknown", (30, 30, 70, 120), (10, 10, 90, 260)),
+            self._person("c1", (200, 10, 300, 260)),
+            self._face("c1", "Unknown", (220, 30, 270, 120), (200, 10, 300, 260)),
+            self._person("c1", (400, 10, 500, 260)),
+            self._face("c1", "Unknown", (420, 30, 470, 120), (400, 10, 500, 260)),
+        ]
+        for i in range(3):
+            st.process(dets, now=1000.0 + i)
+        snap = st.snapshot(now=1000.0 + 2)
+        labels = [t["identity_label"] for t in snap["tracks"]]
+        assert sorted(labels) == ["Unknown 1", "Unknown 2", "Unknown 3"]
+        assert snap["unknown_count"] == 3
+        assert len({t["track_id"] for t in snap["tracks"]}) == 3
+
+    # -- stable numbering across frames + movement ------------------
+    def test_labels_stay_attached_to_tracks_as_they_move(self):
+        st = SpatialTracker(max_age_sec=5.0, adopt_frames=3, iou_threshold=0.2)
+        pA = self._person("c1", (10, 10, 90, 260))
+        fA = self._face("c1", "Unknown", (30, 30, 70, 120), (10, 10, 90, 260))
+        pB = self._person("c1", (200, 10, 300, 260))
+        fB = self._face("c1", "Unknown", (220, 30, 270, 120), (200, 10, 300, 260))
+        for i in range(3):
+            st.process([pA, fA, pB, fB], now=2000.0 + i)
+        before = self._label_by_track(st.snapshot(now=2000.0 + 2))
+        assert before == {"c1#1": "Unknown 1", "c1#2": "Unknown 2"}
+
+        # A walks slowly to the right (IoU keeps the same track alive);
+        # B stands still.  Labels must follow the spatial tracks: the moving
+        # person keeps "Unknown 1", the stationary one keeps "Unknown 2".
+        steps = [((20, 10, 100, 260), (40, 30, 80, 120)),
+                 ((30, 10, 110, 260), (50, 30, 90, 120)),
+                 ((40, 10, 120, 260), (60, 30, 100, 120))]
+        for k, (box, face_box) in enumerate(steps):
+            st.process([
+                self._person("c1", box),
+                self._face("c1", "Unknown", face_box, box),
+                pB, fB,
+            ], now=2010.0 + k)
+        after = self._label_by_track(st.snapshot(now=2010.0 + len(steps) - 1))
+        assert after == {"c1#1": "Unknown 1", "c1#2": "Unknown 2"}
+        # Physical continuity matched: no track was dropped and re-spawned.
+        assert set(after) == {"c1#1", "c1#2"}
+
+    # -- detection-order independence -------------------------------
+    def test_detection_order_change_does_not_renumber(self):
+        st = SpatialTracker(max_age_sec=5.0, adopt_frames=3)
+        pA = self._person("c1", (10, 10, 90, 260))
+        fA = self._face("c1", "Unknown", (30, 30, 70, 120), (10, 10, 90, 260))
+        pB = self._person("c1", (200, 10, 300, 260))
+        fB = self._face("c1", "Unknown", (220, 30, 270, 120), (200, 10, 300, 260))
+        for i in range(3):
+            st.process([pA, fA, pB, fB], now=3000.0 + i)
+        before = self._label_by_track(st.snapshot(now=3000.0 + 2))
+
+        # Same people, detections delivered in a completely different order.
+        for i in range(3):
+            st.process([fB, pB, fA, pA], now=3120.0 + i)
+        after = self._label_by_track(st.snapshot(now=3120.0 + 2))
+        assert before == after
+
+    # -- unknown track disappearance / pruning -----------------------
+    def test_unknown_leaves_other_keeps_label_and_new_track_gets_fresh_one(self):
+        st = SpatialTracker(max_age_sec=3.0, adopt_frames=3)
+        pA = self._person("c1", (10, 10, 90, 260))
+        fA = self._face("c1", "Unknown", (30, 30, 70, 120), (10, 10, 90, 260))
+        pB = self._person("c1", (200, 10, 300, 260))
+        fB = self._face("c1", "Unknown", (220, 30, 270, 120), (200, 10, 300, 260))
+        for i in range(3):
+            st.process([pA, fA, pB, fB], now=4000.0 + i)
+        before = self._label_by_track(st.snapshot(now=4000.0 + 2))
+        assert before["c1#1"] == "Unknown 1"
+        assert before["c1#2"] == "Unknown 2"
+
+        # Track c1#1 leaves beyond max_age -> pruned; c1#2 keeps its label.
+        for i in range(4):
+            st.process([pB, fB], now=4010.0 + i)
+        snap = st.snapshot(now=4014.0)
+        assert len(snap["tracks"]) == 1
+        assert snap["tracks"][0]["track_id"] == "c1#2"
+        assert snap["tracks"][0]["identity_label"] == "Unknown 2"
+
+        # A brand new unknown enters: it must NOT steal "Unknown 2".
+        pC = self._person("c1", (10, 10, 90, 260))
+        fC = self._face("c1", "Unknown", (30, 30, 70, 120), (10, 10, 90, 260))
+        st.process([pB, fB, pC, fC], now=4015.0)
+        after = self._label_by_track(st.snapshot(now=4015.0))
+        assert after["c1#2"] == "Unknown 2"          # survivor unchanged
+        assert "Unknown 1" in after.values()         # new track gets freed label
+
+    # -- track retained (temporary disappearance) --------------------
+    def test_track_retained_keeps_label_while_new_track_appears(self):
+        st = SpatialTracker(max_age_sec=3.0, adopt_frames=3)
+        pA = self._person("c1", (10, 10, 90, 260))
+        fA = self._face("c1", "Unknown", (30, 30, 70, 120), (10, 10, 90, 260))
+        for i in range(3):
+            st.process([pA, fA], now=5000.0 + i)
+        assert st.snapshot(now=5000.0 + 2)["tracks"][0]["identity_label"] == "Unknown 1"
+
+        # A disappears for 1s (still inside max_age): the tracker retains the
+        # track, so the label is preserved instead of being handed to others.
+        st.process([], now=5003.0)
+        assert st.snapshot(now=5003.0)["tracks"][0]["identity_label"] == "Unknown 1"
+        for i in range(2):
+            st.process([pA, fA], now=5004.0 + i)
+        assert st.snapshot(now=5005.0)["tracks"][0]["identity_label"] == "Unknown 1"
+
+        # A second person enters while A's track is alive -> next free label,
+        # not a steal of A's active "Unknown 1".
+        pB = self._person("c1", (200, 10, 300, 260))
+        fB = self._face("c1", "Unknown", (220, 30, 270, 120), (200, 10, 300, 260))
+        st.process([pA, fA, pB, fB], now=5006.0)
+        labels = {t["identity_label"] for t in st.snapshot(now=5006.0)["tracks"]}
+        assert labels == {"Unknown 1", "Unknown 2"}
+
+    # -- known employee never labelled -------------------------------
+    def test_known_employee_never_labeled_unknown(self):
+        st = SpatialTracker(adopt_frames=3)
+        p = self._person("c1", (10, 10, 90, 260))
+        f = self._face("c1", "EMP001", (30, 30, 70, 120), (10, 10, 90, 260),
+                       score=0.9)
+        for i in range(3):
+            st.process([p, f], now=6000.0 + i)
+        snap = st.snapshot(now=6000.0 + 2)
+        assert snap["unknown_count"] == 0
+        row = snap["tracks"][0]
+        assert row["identity"] == "EMP001"
+        assert row["identity_label"] == "EMP001"
+        assert row["unknown_label"] is None
+
+    # -- known employee + multiple unknowns, no collision -----------
+    def test_known_plus_unknowns_no_collision(self):
+        st = SpatialTracker(max_age_sec=5.0, adopt_frames=3)
+        dets = [
+            self._person("c1", (0, 10, 80, 260)),
+            self._face("c1", "EMP001", (10, 30, 60, 120), (0, 10, 80, 260), score=0.9),
+            self._person("c1", (160, 10, 250, 260)),
+            self._face("c1", "Unknown", (180, 30, 230, 120), (160, 10, 250, 260)),
+            self._person("c1", (340, 10, 430, 260)),
+            self._face("c1", "Unknown", (360, 30, 410, 120), (340, 10, 430, 260)),
+        ]
+        for i in range(3):
+            st.process(dets, now=7000.0 + i)
+        snap = st.snapshot(now=7000.0 + 2)
+        labels = [t["identity_label"] for t in snap["tracks"]]
+        assert sorted(labels) == ["EMP001", "Unknown 1", "Unknown 2"]
+        assert snap["unknown_count"] == 2
+        assert set(snap["tracks"][i]["identity"] for i in range(3)) == \
+            {"EMP001", "Unknown"}
+
+        # No label string can ever collide with an employee id: numbered
+        # Unknown labels never look like EMP ids and vice versa.
+        emp_labels = [l for l in labels
+                      if l != "Unknown" and not l.startswith("Unknown ")]
+        assert emp_labels == ["EMP001"]
+        assert not any(l.startswith("EMP") for l in labels if l.startswith("Unknown"))
+
+    # -- numbering is display-only -----------------------------------
+    def test_numbering_is_display_only_canonical_identity_untouched(self):
+        st = SpatialTracker(adopt_frames=3)
+        p = self._person("c1", (10, 10, 90, 260))
+        f = self._face("c1", "Unknown", (30, 30, 70, 120), (10, 10, 90, 260))
+        for i in range(3):
+            st.process([p, f], now=8000.0 + i)
+        tracks = st.active_tracks(8000.0 + 2)
+        assert tracks[0].identity == "Unknown"     # canonical id untouched
+        assert tracks[0].unknown_label == 1
+        snap = st.snapshot(now=8000.0 + 2)
+        assert snap["tracks"][0]["identity"] == "Unknown"
+        assert snap["tracks"][0]["identity_label"] == "Unknown 1"
+        json.dumps(snap)                          # must stay JSON-safe
+
+    # -- live_state / dashboard passthrough --------------------------
+    def test_live_state_spatial_tracks_carry_labels(self, tmp_path):
+        st = SpatialTracker(adopt_frames=3)
+        p = self._person("c1", (10, 10, 90, 260))
+        f = self._face("c1", "Unknown", (30, 30, 70, 120), (10, 10, 90, 260))
+        for i in range(3):
+            st.process([p, f], now=9000.0 + i)
+        import main as _m
+        target = str(tmp_path / "live_spatial.json")
+        old_file = _m._LIVE_STATE_FILE
+        _m._LIVE_STATE_FILE = target
+        try:
+            _m._write_live_state(
+                {"Unknown": "ACTIVE"},
+                {"Unknown": {"ACTIVE": 1.0, "ON_PHONE": 0.0, "AWAY": 0.0}},
+                {"local_webcam": {"health": "ONLINE", "usable": True}}, 2.0,
+                sources={"Unknown": "local_webcam"},
+                durations={"Unknown": 1.0},
+                spatial=st.snapshot(now=9000.0 + 2),
+            )
+        finally:
+            _m._LIVE_STATE_FILE = old_file
+        data = json.loads(Path(target).read_text(encoding="utf-8"))
+        tr = data["ai"]["spatial_tracks"]["tracks"][0]
+        assert tr["identity_label"] == "Unknown 1"
+        assert tr["identity"] == "Unknown"
+        assert tr["unknown_label"] == 1
+        assert data["ai"]["spatial_tracks"]["unknown_count"] == 1

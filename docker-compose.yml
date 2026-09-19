@@ -69,6 +69,10 @@ assert time.time()-d.get('updated',0) < 120, 'stale snapshot'"]
       # Opt-in data retention (never deletes unless enabled).
       - CCTV_ENABLE_RETENTION=${CCTV_ENABLE_RETENTION:-0}
       - CCTV_RETENTION_LOGS_DAYS=${CCTV_RETENTION_LOGS_DAYS:-365}
+      - CCTV_RETENTION_REPORTS_DAYS=${CCTV_RETENTION_REPORTS_DAYS:-365}
+      # Phase 54 M06 -- biometric cache retention (0 = never prune derived
+      # embedding caches; duplicates CCTV_ENABLE_RETENTION gating).
+      - CCTV_RETENTION_BIOMETRICS_DAYS=${CCTV_RETENTION_BIOMETRICS_DAYS:-0}
       # SMTP config for automated EOD email delivery (optional).
       - SMTP_SERVER=${SMTP_SERVER:-smtp.example.com}
       - SMTP_PORT=${SMTP_PORT:-587}
@@ -122,11 +126,19 @@ s = socket.create_connection(('127.0.0.1', 8501), 5); s.close()"]
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
       # Dashboard auto-refresh + role-based auth.
+      # Phase 54 M01/M09 -- secure-by-default: auth is ON unless explicitly
+      # disabled, and fail-closed denies all requests when no credentials are
+      # configured.  To keep the previously-default open dashboard, set
+      #   CCTV_DASH_AUTH=0  (and remove the fail-closed override below).
+      # Deploy the dashboard behind a TLS reverse proxy (e.g. Caddy/nginx) that
+      # terminates HTTPS -- this compose maps 8501 unencrypted on 0.0.0.0.
       - CCTV_DASH_REFRESH=${CCTV_DASH_REFRESH:-5}
-      - CCTV_DASH_AUTH=${CCTV_DASH_AUTH:-0}
+      - CCTV_DASH_AUTH=${CCTV_DASH_AUTH:-1}
+      - CCTV_DASH_FAIL_CLOSED=${CCTV_DASH_FAIL_CLOSED:-1}
       - CCTV_DASH_USER=${CCTV_DASH_USER:-admin}
       - CCTV_DASH_PASS=${CCTV_DASH_PASS:-}
       - CCTV_DASH_VIEWER_PASS=${CCTV_DASH_VIEWER_PASS:-}
+      - CCTV_DASH_SESSION_MINUTES=${CCTV_DASH_SESSION_MINUTES:-30}
       # Working window display consistency.
       - CCTV_WORK_START=${CCTV_WORK_START:-09:00}
       - CCTV_WORK_END=${CCTV_WORK_END:-18:00}

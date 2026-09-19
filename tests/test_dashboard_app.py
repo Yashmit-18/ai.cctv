@@ -56,10 +56,12 @@ def test_live_employees_and_camera_health_tabs_render():
     at = _app()
     at.run()
     assert not at.exception, at.exception
-    # The Live Employees tab and Camera Health tab should not raise whether or
-    # not a live snapshot exists (empty state shown when absent).
-    assert len(at.tabs) >= 7  # all seven tabs exist
-    assert len(at.caption) >= 0  # captions render without error
+    # The Live Employees and Camera Health content should not raise whether or
+    # not a live snapshot exists (empty state shown when absent).  The app now
+    # uses a sidebar navigation shell (Phase 42) whose live pages hold that
+    # content.
+    assert len(at.sidebar.radio) >= 1  # the sidebar navigation exists
+    assert len(at.metric) >= 4          # KPI cards render without error
 
 
 def test_productivity_bar_handles_no_observation_rows():
@@ -83,3 +85,19 @@ def test_productivity_bar_handles_no_observation_rows():
     fig = app._productivity_bar_figure(with_activity)
     assert fig is not None
     assert len(fig.data) == 1
+
+
+def test_sidebar_navigation_switches_every_page_without_exception():
+    # Phase 42 app shell: the sidebar navigation must expose every dashboard
+    # page and each page must render without raising under AppTest.
+    import app as appmodule
+
+    at = _app()
+    at.run()
+    assert not at.exception, at.exception
+    nav = at.sidebar.radio[0]
+    assert len(nav.options) == len(appmodule._NAV_LABELS) == 8
+    for option in nav.options:
+        nav.set_value(option)
+        at.run()
+        assert not at.exception, (option, at.exception)

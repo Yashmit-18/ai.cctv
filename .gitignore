@@ -15,7 +15,7 @@ data/
 
 # ---- ML models (large weights; re-download on setup) -----------
 models/*.pt
-models/yolov8*.pt
+models/*.pth
 
 # ---- Python -----------------------------------------------------
 __pycache__/
@@ -44,3 +44,5 @@ Thumbs.db
 .DS_Store
 # Local backup files
 main_backup_*.py
+# Stray PowerShell activation-command artifact (accidental file, audit sweep item)
+s -ExecutionPolicy*

@@ -17,7 +17,9 @@ Run
     streamlit run app.py
 """
 
+import html
 import json
+import logging
 import os
 import pickle
 import re
@@ -56,11 +58,17 @@ from src.zones import ZoneStore
 # ----------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------
-_LIVE_STATE_FILE = Path(PROJECT_ROOT) / "data" / "live_state.json"
-_STATE_COLOR = {"ACTIVE": "#2ecc71", "ON_PHONE": "#e67e22", "AWAY": "#e74c3c"}
+# Where the daemon's live snapshot lives.  ``CCTV_LIVE_STATE_FILE`` is a
+# test seam: when set (e.g. in the test harness) the dashboard reads the
+# snapshot from that path instead, so AppTests can feed isolated fixture
+# snapshots without ever touching the production file.  The daemon itself is
+# not affected -- it always writes the real ``data/live_state.json``.
+_LIVE_STATE_FILE = (Path(os.environ["CCTV_LIVE_STATE_FILE"])
+                    if os.environ.get("CCTV_LIVE_STATE_FILE") else
+                    Path(PROJECT_ROOT) / "data" / "live_state.json")
 
 st.set_page_config(
-    page_title="CCTV Productivity Dashboard",
+    page_title="AI CCTV Intelligence — Security Operations Center",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -292,6 +300,18 @@ def _auth_fail_closed() -> bool:
 
 def do_auth() -> str:
     """Return the role ('admin' / 'viewer') after login, or '' if not authed."""
+    # Production fail-closed must gate BEFORE the _auth_enabled() shortcut:
+    # when no password is configured _auth_enabled() is False and, without this
+    # guard, the dashboard silently opened as admin despite DASH_FAIL_CLOSED=1.
+    if _auth_fail_closed():
+        st.error(
+            "Dashboard authentication is enabled but no admin/viewer password "
+            "is configured. Access is blocked (fail-closed). Set "
+            "CCTV_DASH_PASS (and optionally CCTV_DASH_VIEWER_PASS) in your "
+            "environment / .env to enable the dashboard. For local development "
+            "only, set CCTV_DASH_AUTH=0."
+        )
+        return ""
     if not _auth_enabled():
         return "admin"
     if "cctv_role" in st.session_state:
@@ -306,15 +326,6 @@ def do_auth() -> str:
         else:
             return st.session_state["cctv_role"]
     st.markdown("### Login")
-    if _auth_fail_closed():
-        st.error(
-            "Dashboard authentication is enabled but no admin/viewer password "
-            "is configured. Access is blocked (fail-closed). Set "
-            "CCTV_DASH_PASS (and optionally CCTV_DASH_VIEWER_PASS) in your "
-            "environment / .env to enable the dashboard. For local development "
-            "only, set CCTV_DASH_AUTH=0."
-        )
-        return ""
     st.caption("Admin: full control (employees, enrollment). "
                "Viewer: monitor, analytics and report downloads only.")
     with st.form("login"):
@@ -322,16 +333,28 @@ def do_auth() -> str:
         pw = st.text_input("Password", type="password")
         submit = st.form_submit_button("Sign in")
     if submit:
-        if user == DASH_USERNAME and pw == DASH_ADMIN_PASS:
-            st.session_state["cctv_role"] = "admin"
-            st.session_state["cctv_login_ts"] = time.time()
-            st.rerun()
-        elif DASH_VIEWER_PASS and pw == DASH_VIEWER_PASS:
-            st.session_state["cctv_role"] = "viewer"
+        role = _authenticate(user, pw)
+        if role:
+            st.session_state["cctv_role"] = role
             st.session_state["cctv_login_ts"] = time.time()
             st.rerun()
         else:
             st.error("Invalid credentials.")
+    return ""
+
+
+def _authenticate(user: str, pw: str) -> str:
+    """Validate dashboard credentials; returns 'admin' / 'viewer' / ''.
+
+    Admin is only granted against a non-empty configured admin password: an
+    empty ``CCTV_DASH_PASS`` must never let a blank password escalate to admin
+    (previously, with only ``CCTV_DASH_VIEWER_PASS`` set, ``user="admin"`` and
+    ``pw=""`` matched ``pw == DASH_ADMIN_PASS`` and granted admin).
+    """
+    if DASH_ADMIN_PASS and user == DASH_USERNAME and pw == DASH_ADMIN_PASS:
+        return "admin"
+    if DASH_VIEWER_PASS and pw == DASH_VIEWER_PASS:
+        return "viewer"
     return ""
 
 
@@ -390,6 +413,516 @@ def _live_overview_metrics(df_today: pd.DataFrame, live: dict) -> dict:
 
 
 # ======================================================================
+# Phase 42 -- premium SOC design system (UI only; no backend changes)
+# ======================================================================
+
+_NAV = [
+    ("Dashboard", "dashboard", ":material/dashboard:"),
+    ("Live Monitoring", "live", ":material/videocam:"),
+    ("Employees", "employees", ":material/people:"),
+    ("Security", "security", ":material/shield:"),
+    ("Reports", "reports", ":material/description:"),
+    ("Analytics", "analytics", ":material/query_stats:"),
+    ("Settings", "settings", ":material/settings:"),
+    ("Deploy / System Check", "deploy", ":material/rocket_launch:"),
+]
+_NAV_LABELS = [f"{icon} {label}" for label, _key, icon in _NAV]
+_NAV_KEYS = {f"{icon} {label}": key for label, key, icon in _NAV}
+
+_STATE_VIEW = {
+    "ACTIVE":       ("ACTIVE",       "green",  "timelapse",      "Present and active."),
+    "ON_PHONE":     ("ON PHONE",     "orange", "phone_iphone",   "On a personal phone call."),
+    "ON BREAK":     ("ON BREAK",     "gray",   "coffee",         "On a scheduled break."),
+    "AWAY":         ("AWAY",         "gray",   "person_off",     "Away from the station."),
+    "NOT_OBSERVED": ("NOT OBSERVED", "gray",   "visibility_off", "On roster; not observed this session."),
+    "UNKNOWN":      ("UNKNOWN",      "violet", "question_mark",  "Unrecognised person -- never attributed to an employee."),
+}
+
+_CAMERA_VIEW = {
+    "ONLINE":          ("ONLINE",          "green",  "videocam"),
+    "LOW_FPS":         ("LOW FPS",         "orange", "speed"),
+    "RECONNECTING":    ("RECONNECTING",    "orange", "sync"),
+    "NO_FRAME":        ("NO FRAME",        "red",    "videocam_off"),
+    "OFFLINE":         ("OFFLINE",         "red",    "videocam_off"),
+    "FROZEN_FRAME":    ("FROZEN FRAME",    "violet", "pause_circle"),
+    "NOT_CONFIGURED":  ("NOT CONFIGURED",  "gray",   "settings_input_antenna"),
+}
+
+_CHIP_TONES = {
+    "green":  {"bg": "#0E271D", "fg": "#9BE8C4", "bd": "#1F6B45"},
+    "orange": {"bg": "#291E11", "fg": "#F6C794", "bd": "#7A5324"},
+    "red":    {"bg": "#2A1412", "fg": "#F0A39B", "bd": "#7E2C25"},
+    "gray":   {"bg": "#151D2B", "fg": "#B7C0CE", "bd": "#38445A"},
+    "violet": {"bg": "#201628", "fg": "#CDBCF7", "bd": "#5A468C"},
+    "blue":   {"bg": "#14233F", "fg": "#BAD3FF", "bd": "#2F5ED6"},
+}
+
+_COMPONENT_CSS = """
+<style>
+.p42 { font-family:"Inter","Segoe UI",system-ui,sans-serif; color:#E6EDF7; }
+.p42-ic { font-family:"Material Symbols Outlined"; font-weight:400; font-size:15px;
+          line-height:1; vertical-align:-2px; }
+.p42-chip { display:inline-flex; align-items:center; gap:5px; padding:3px 10px;
+            border-radius:999px; font-size:11px; font-weight:600; letter-spacing:.5px;
+            border:1px solid; white-space:nowrap; }
+.p42-chip-lg { font-size:12px; padding:4px 12px; }
+.p42-chip-sm { font-size:10px; padding:2px 7px; }
+.p42-strip { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:2px 0 12px; }
+.p42-strip .p42-mut { color:#8B96A8; font-size:12px; }
+.p42-topbar { display:flex; align-items:center; justify-content:space-between;
+              gap:16px; padding:14px 2px 12px; border-bottom:1px solid #1E2A40; }
+.p42-brand { display:flex; align-items:center; gap:12px; }
+.p42-brand-mark { width:40px; height:40px; border-radius:10px; flex:0 0 auto;
+                  background:#14213D; border:1px solid #1E2A40; display:grid; place-items:center;
+                  color:#4C7DF0; font-size:20px; }
+.p42-brand-name { font-size:19px; font-weight:700; letter-spacing:.3px; line-height:1.2; }
+.p42-brand-sub { font-size:10.5px; color:#8B96A8; letter-spacing:1.8px; text-transform:uppercase; }
+.p42-topbar-right { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.p42-role-badge { display:inline-flex; align-items:center; gap:6px; font-size:11px;
+                  font-weight:600; letter-spacing:.8px; text-transform:uppercase;
+                  color:#BAD3FF; border:1px solid #2F5ED6; background:#14233F;
+                  padding:3px 10px; border-radius:999px; }
+.p42-clock { text-align:right; font-size:12px; }
+.p42-clock b { font-size:15px; font-weight:700; letter-spacing:.4px; }
+.p42-clock span { color:#8B96A8; }
+.cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr));
+         gap:12px; margin:6px 0 14px; }
+.p42-card { background:#111A2B; border:1px solid #1E2A40; border-radius:12px; padding:14px 16px; }
+.p42-cam-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.p42-cam-name { font-weight:700; font-size:14px; }
+.p42-cam-id { font-size:10px; color:#8B96A8; letter-spacing:.8px; text-transform:uppercase; margin-top:1px; }
+.p42-cam-meta { display:grid; grid-template-columns:1fr 1fr; gap:9px; margin-top:11px; font-size:12px; }
+.p42-cam-meta b { display:block; font-size:9.5px; color:#8B96A8; letter-spacing:.9px;
+                  text-transform:uppercase; font-weight:600; }
+.p42-cam-meta span { color:#C9D4E3; }
+.p42-cam-note { margin-top:11px; font-size:11.5px; color:#F0A39B; }
+.p42-person { display:flex; gap:12px; align-items:flex-start; }
+.p42-avatar { width:38px; height:38px; border-radius:50%; flex:0 0 auto; display:grid;
+              place-items:center; font-weight:700; font-size:13px; color:#E6EDF7;
+              background:#1A2B4D; border:1px solid #1E2A40; }
+.p42-avatar.unk { background:#241D33; color:#CDBCF7; }
+.p42-person .p42-body { min-width:0; flex:1; }
+.p42-person-name { font-weight:700; font-size:14px; line-height:1.25; }
+.p42-person-id { font-size:10.5px; color:#8B96A8; letter-spacing:.6px; }
+.p42-person-meta { margin-top:8px; display:flex; flex-direction:column; gap:3px; font-size:12px; }
+.p42-person-meta .p42-row { display:flex; justify-content:space-between; gap:10px; }
+.p42-person-meta .p42-row span:first-child { color:#8B96A8; }
+.p42-person-meta .p42-row span:last-child { color:#C9D4E3; }
+.p42-person-meta .p42-row.p42-phone { color:#F6C794; }
+.p42-empty { border:1px dashed #1E2A40; border-radius:12px; padding:20px; color:#8B96A8; font-size:13px; }
+.p42-footer { margin-top:34px; padding-top:12px; border-top:1px solid #1E2A40;
+              color:#8B96A8; font-size:11px; display:flex; gap:18px; flex-wrap:wrap; }
+.p42-mut { color:#8B96A8; font-size:11px; }
+</style>
+"""
+
+
+def _view_state(state) -> dict:
+    """Normalize a live state to (label, tone, icon, hint).  'Unknown' stays
+    neutral violet -- never red, never an employee.  Pure, never throws."""
+    key = str(state or "").strip().upper()
+    row = _STATE_VIEW.get(key)
+    if row is not None:
+        label, tone, icon, hint = row
+        return {"key": key, "label": label, "tone": tone, "icon": icon, "hint": hint}
+    label = str(state).replace("_", " ") or "—"
+    return {"key": key, "label": label, "tone": "gray", "icon": "circle", "hint": ""}
+
+
+def _view_camera(code) -> dict:
+    key = str(code or "OFFLINE").strip().upper()
+    row = _CAMERA_VIEW.get(key)
+    if row is None:
+        return {"key": key, "label": key.replace("_", " "), "tone": "gray", "icon": "videocam"}
+    label, tone, icon = row
+    return {"key": key, "label": label, "tone": tone, "icon": icon}
+
+
+def _chip_html(view: dict, size: str = "") -> str:
+    tone = _CHIP_TONES.get(view["tone"], _CHIP_TONES["gray"])
+    cls = "p42-chip" if not size else f"p42-chip {size}"
+    return (f"<span class='{cls}' style='background:{tone['bg']};color:{tone['fg']};"
+            f"border-color:{tone['bd']};'>"
+            f"<span class='p42-ic'>{view['icon']}</span>{html.escape(view['label'])}</span>")
+
+
+def _safe_cam_source(src) -> str:
+    src = str(src or "")
+    if not src:
+        return "—"
+    if "://" in src:
+        return "RTSP (hidden)"
+    return src
+
+
+def _live_kpis(live: dict, df_today: pd.DataFrame) -> dict:
+    """Real-data-only KPI summary used by the dashboard KPI cards.
+
+    ``active``/``away``/``on_phone`` come from the live snapshot states;
+    ``open_incidents`` from the security snapshot.  Nothing is ever invented:
+    with no snapshot the live-derived fields are zero, never guessed.
+    """
+    m = _live_overview_metrics(df_today, live)
+    states = live.get("states", {}) if live else {}
+    emp_states = {k: v for k, v in states.items()
+                  if not str(k).lower().startswith("unknown")}
+    cam_health = live.get("camera_health", {}) if live else {}
+    security = live.get("security", {}) if live else {}
+    return {
+        "recognised": m["recognised"],
+        "avg_pct": m["avg_pct"],
+        "total_active": m["total_active"],
+        "phone_mins": m["phone_mins"],
+        "active": sum(1 for s in emp_states.values() if str(s).upper() == "ACTIVE"),
+        "on_phone": sum(1 for s in emp_states.values() if str(s).upper() == "ON_PHONE"),
+        "away": sum(1 for s in emp_states.values() if str(s).upper() == "AWAY"),
+        "unknown": sum(1 for k in states if str(k).lower().startswith("unknown")),
+        "present": m["present_now"],
+        "cameras_online": sum(1 for h in cam_health.values()
+                              if str(h.get("health", "")).upper() == "ONLINE"),
+        "cameras_total": len(cam_health),
+        "employees_total": len(live.get("employees", {})) if live else 0,
+        "open_incidents": security.get("open_incidents"),
+    }
+
+
+def _snapshot_status(live: dict) -> dict:
+    """Classify the daemon snapshot as LIVE / STALE / OFFLINE (never pretends)."""
+    if not live:
+        age = live_state_age()
+        if age is None:
+            return {"kind": "offline", "label": "NO SNAPSHOT", "tone": "gray",
+                    "icon": "link_off", "iso": "—", "age": None}
+        return {"kind": "stale", "label": "STALE", "tone": "orange",
+                "icon": "schedule", "iso": "—", "age": age}
+    return {"kind": "live", "label": "LIVE", "tone": "green",
+            "icon": "monitor_heart", "iso": live.get("iso", "—"),
+            "age": time.time() - live.get("updated", time.time())}
+
+
+def _inject_shell_css() -> None:
+    """Global (app-level) scoped styles: metrics, sidebar, tables, expanders.
+
+    Rendered once per session via ``st.markdown`` so it styles the host app
+    document (``st.html`` output lives in a sandboxed iframe and cannot reach
+    native widgets).  Selectors are scoped to Streamlit test ids / element keys
+    so no external page is affected.
+    """
+    if st.session_state.get("_p42_css_injected"):
+        return
+    st.session_state["_p42_css_injected"] = True
+    st.markdown(
+        """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=block');
+
+html, body, [class*="st-emotion-cache"], [data-testid="stAppViewContainer"] {
+    font-family: "Inter","Segoe UI",system-ui,sans-serif;
+}
+[data-testid="stAppViewContainer"] { background:#0A0F1C; }
+h1,h2,h3,h4 { letter-spacing:.2px; color:#E6EDF7; }
+p, label, span, div { color:#E6EDF7; }
+
+[data-testid="stSidebar"] { background:#0C1322; border-right:1px solid #1E2A40; }
+[data-testid="stSidebar"] p, [data-testid="stSidebar"] span,
+[data-testid="stSidebar"] label { color:#C9D4E3; }
+section[data-testid="stSidebar"] .p42-nav-label {
+    font-size:10.5px; letter-spacing:1.4px; text-transform:uppercase; color:#8B96A8; margin-bottom:4px;
+}
+
+div[data-testid="stMetric"] {
+    background:#111A2B; border:1px solid #1E2A40; border-radius:12px;
+    padding:12px 16px 14px; box-shadow:0 1px 0 rgba(255,255,255,.02);
+}
+div[data-testid="stMetricLabel"] {
+    font-size:10.5px; letter-spacing:1.1px; text-transform:uppercase; color:#8B96A8;
+}
+div[data-testid="stMetricValue"] { font-weight:700; font-size:1.65rem; }
+
+[data-testid="stDataFrame"] {
+    border:1px solid #1E2A40; border-radius:10px; overflow:hidden; background:#0E1624;
+}
+[data-testid="stDataFrame"] thead th {
+    background:#0F1626; color:#8B96A8; font-size:11px; letter-spacing:.6px; text-transform:uppercase;
+}
+[data-testid="stDataFrame"] tbody tr:hover { background:rgba(76,125,240,.07); }
+
+[data-testid="stExpander"] {
+    border:1px solid #1E2A40; border-radius:12px; background:#0E1624;
+}
+
+section[data-testid="stSidebar"] .st-key-p42_nav [data-testid="stRadio"] label p {
+    font-size:13px; padding:6px 10px; border-radius:8px; margin:1px 0;
+}
+section[data-testid="stSidebar"] .st-key-p42_nav [data-testid="stRadio"] label:hover p {
+    background:#14203A;
+}
+section[data-testid="stSidebar"] .st-key-p42_nav p { color:#C9D4E3; }
+
+div[data-testid="stVerticalBlockBorderWrapper"] { background:#0E1624; }
+
+.stButton > button, .stButton > button[kind="primary"] {
+    border-radius:9px; font-weight:600;
+}
+.stButton > button[kind="primary"] { background:#2A47A8; border:1px solid #4C7DF0; }
+.stSidebar button:hover { border-color:#4C7DF0; }
+
+div[data-testid="stHorizontalBlock"] { gap:0.75rem; }
+hr { border-color:#1E2A40 !important; }
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_topbar(role: str) -> None:
+    snap = _snapshot_status(load_live_state())
+    clock = time.strftime("%H:%M:%S")
+    day = time.strftime("%a, %d %b %Y")
+    role_badge = (f"<span class='p42-role-badge'><span class='p42-ic'>admin_panel_settings</span>"
+                  f"Admin</span>") if role == "admin" else (
+                  f"<span class='p42-role-badge'><span class='p42-ic'>visibility</span>Viewer</span>")
+    st.html(
+        _COMPONENT_CSS + f"""
+<div class='p42 p42-topbar'>
+  <div class='p42-brand'>
+    <div class='p42-brand-mark'><span class='p42-ic'>security</span></div>
+    <div>
+      <div class='p42-brand-name'>AI CCTV Intelligence</div>
+      <div class='p42-brand-sub'>Security Operations Center</div>
+    </div>
+  </div>
+  <div class='p42-topbar-right'>
+    {_chip_html({"label": f"Snapshot: {snap['label']}", "tone": snap["tone"], "icon": snap["icon"]}, "p42-chip-lg")}
+    <span class='p42-mut'>Updated {html.escape(str(snap['iso']))}</span>
+    {role_badge}
+    <div class='p42-clock'><b>{clock}</b><br/><span>{day}</span></div>
+  </div>
+</div>
+"""
+    )
+
+
+def _render_snapshot_strip(live: dict) -> None:
+    snap = _snapshot_status(live)
+    parts = [
+        _chip_html({"label": snap["label"], "tone": snap["tone"], "icon": snap["icon"]}),
+    ]
+    if snap["kind"] == "live":
+        parts.append(f"<span class='p42-mut'>Snapshot {html.escape(str(snap['iso']))}"
+                     f" &middot; {snap['age']:.0f}s ago</span>")
+    elif snap["kind"] == "stale" and isinstance(snap["age"], (int, float)):
+        parts.append(f"<span class='p42-mut'>Last snapshot {snap['age']:.0f}s ago"
+                     " &middot; daemon may be stopped</span>")
+    else:
+        parts.append("<span class='p42-mut'>Start the daemon: "
+                     "`python main.py --source auto --headless --no-email`</span>")
+    if live:
+        fps = live.get("fps", 0.0)
+        det = live.get("last_detection_sec")
+        det_note = "no detection yet"
+        if isinstance(det, (int, float)):
+            det_note = f"last detection {int(det)}s ago" if det < 3600 \
+                else f"last detection {det / 3600:.1f}h ago"
+        parts.append(f"<span class='p42-mut'>Daemon FPS {fps:.1f} &middot; {det_note}</span>")
+    st.html(_COMPONENT_CSS + f"<div class='p42 p42-strip'>{''.join(parts)}</div>")
+
+
+def _render_kpi_row(live: dict, m: dict) -> None:
+    k = _live_kpis(live, pd.DataFrame())
+    cams = f"{k['cameras_online']}/{k['cameras_total']}" if k["cameras_total"] else "—"
+    open_inc = "—" if k["open_incidents"] is None else str(k["open_incidents"])
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Cameras Online", cams,
+              help="Operational camera feeds (health == ONLINE). A camera that is "
+                   "offline / not delivering usable frames is never counted as AWAY.")
+    c2.metric("People Active", f"{k['active']}",
+              help="Employees currently ACTIVE in the live snapshot.")
+    c3.metric("Away", f"{k['away']}",
+              help="Employees currently AWAY (from the daemon, not a frontend timer).")
+    c4.metric("On Phone", f"{k['on_phone']}",
+              help="Employees currently in ON_PHONE state (one alert per episode).")
+    c5.metric("Open Incidents", open_inc,
+              help="Open incidents from the security snapshot (real security events).")
+
+
+def _render_analytics_row(df_today: pd.DataFrame, m: dict) -> None:
+    has_data = not df_today.empty
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Recognised Today", f"{m['recognised']}" if has_data else "n/a")
+    c2.metric("Avg Productivity", f"{m['avg_pct']:.0f}%" if m["avg_pct"] else "n/a")
+    c3.metric("Active Hours Today", f"{m['total_active']:.1f}h" if has_data else "n/a")
+    c4.metric("Phone Today", f"{m['phone_mins']:.0f}m" if has_data else "n/a")
+
+
+def _render_camera_cards(live: dict) -> None:
+    if not live:
+        st.html(_COMPONENT_CSS + "<div class='p42 p42-empty'>No live daemon snapshot — "
+                "camera status is unavailable while `main.py` is not running.</div>")
+        return
+    health = live.get("camera_health", {})
+    if not health:
+        st.html(_COMPONENT_CSS + "<div class='p42 p42-empty'>No cameras configured.</div>")
+        return
+    try:
+        import config as _cfg
+        configured = set(_cfg.CAMERAS.keys()) | {c.get("source") or c.get("id")
+                                                 for c in health.values()}
+    except Exception:  # pragma: no cover
+        configured = {c.get("id") for c in health.values()}
+    cards = []
+    for cid in sorted(health):
+        h = health[cid]
+        code = h.get("health", "OFFLINE")
+        view = _view_camera(code)
+        chip = _chip_html(view)
+        last = h.get("last_frame", 0)
+        last_s = time.strftime("%H:%M:%S", time.localtime(last)) if last else "—"
+        fps = ("—" if str(code).upper() == "OFFLINE"
+               else f"{round(float(h.get('fps', 0) or 0), 2)}")
+        src = h.get("source") or h.get("id") or cid
+        source = _safe_cam_source(src)
+        configured_s = ("Configured" if (src in configured or cid in configured)
+                        else "Not configured")
+        usable = h.get("usable")
+        usable_s = "—" if usable is None else ("Usable frames" if usable else "Not usable")
+        note = ""
+        if str(code).upper() in ("OFFLINE", "NO_FRAME", "RECONNECTING") or \
+                h.get("unusable_reason") == "DARK_BLANK_FRAME":
+            reason = h.get("unusable_reason", "") or ""
+            note = ("Camera not delivering usable frames — this is <b>not</b> employee "
+                    "absence and never counts as AWAY." if not reason else
+                    f"Feed not usable ({reason}) — preserved states are frozen; "
+                    "this is never counted as AWAY.")
+        cards.append(
+            f"<div class='p42-card'><div class='p42-cam-head'>"
+            f"<div><div class='p42-cam-name'>{html.escape(cid)}</div>"
+            f"<div class='p42-cam-id'>{html.escape(configured_s)}</div></div>{chip}</div>"
+            f"<div class='p42-cam-meta'>"
+            f"<div><b>Last frame</b><span>{last_s}</span></div>"
+            f"<div><b>FPS</b><span>{fps}</span></div>"
+            f"<div><b>Source</b><span>{html.escape(source)}</span></div>"
+            f"<div><b>Frames</b><span>{h.get('frames_read', 0)}</span></div>"
+            f"</div>{f'<div class=\'p42-cam-note\'>{note}</div>' if note else ''}</div>"
+        )
+    st.html(_COMPONENT_CSS + f"<div class='p42 cards'>{''.join(cards)}</div>")
+
+
+def _initials(name: str) -> str:
+    parts = [p for p in re.split(r"\s+", str(name or "").strip()) if p]
+    if not parts:
+        return "?"
+    return (parts[0][0] + (parts[-1][0] if len(parts) > 1 else "")).upper()
+
+
+def _render_people_cards(live: dict) -> None:
+    if not live:
+        return
+    states = live.get("states", {})
+    employees = live.get("employees", {})
+    last_seen_top = live.get("last_seen", {})
+    durations = live.get("durations", {})
+    telemetry = live.get("telemetry", {})
+    now = time.time()
+
+    def _fmt_secs(secs) -> str:
+        secs = float(secs or 0)
+        h, rem = divmod(int(secs), 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    cards = []
+    for emp_id in sorted(employees):
+        emp = employees[emp_id]
+        state = emp.get("state", "")
+        view = _view_state(state)
+        name = emp.get("name", "") or emp_id
+        ls = emp.get("last_seen")
+        ls_s = time.strftime("%H:%M:%S", time.localtime(ls)) if ls else "—"
+        ago = f"{(now - ls):.0f}s ago" if ls else "—"
+        session = _fmt_secs(emp.get("session_sec", 0))
+        source = _safe_cam_source(emp.get("source", ""))
+        phone_sec = float(emp.get("phone_sec", 0) or 0)
+        phone_state = _view_state(state)["key"] == "ON_PHONE"
+        phone_row = ""
+        if phone_state or phone_sec > 0:
+            val = "NOW" if phone_state else f"{phone_sec:.0f}s"
+            phone_row = (f"<div class='p42-row p42-phone'><span>Phone</span>"
+                         f"<span class='p42-ic'>phone_iphone</span> {val}</div>")
+        cards.append(
+            f"<div class='p42-card'><div class='p42-person'>"
+            f"<div class='p42-avatar'>{html.escape(_initials(name))}</div>"
+            f"<div class='p42-body'>"
+            f"<div class='p42-person-name'>{html.escape(name)}</div>"
+            f"<div class='p42-person-id'>{html.escape(emp_id)}</div>"
+            f"<div style='margin-top:7px'>{_chip_html(view)}</div>"
+            f"<div class='p42-person-meta'>"
+            f"<div class='p42-row'><span>Camera</span><span>{html.escape(source)}</span></div>"
+            f"<div class='p42-row'><span>Last seen</span><span>{ls_s} · {ago}</span></div>"
+            f"<div class='p42-row'><span>Session</span><span>{session}</span></div>"
+            f"{phone_row}</div></div></div></div>"
+        )
+
+    unknown = [k for k in states if str(k).lower().startswith("unknown")]
+    for k in sorted(unknown, key=lambda s: str(s).lower()):
+        view = _view_state("UNKNOWN")
+        ls = last_seen_top.get(k)
+        ls_s = time.strftime("%H:%M:%S", time.localtime(ls)) if ls else "—"
+        sess = _fmt_secs(durations.get(k, 0.0) or 0.0)
+        cards.append(
+            f"<div class='p42-card'><div class='p42-person'>"
+            f"<div class='p42-avatar unk'><span class='p42-ic'>question_mark</span></div>"
+            f"<div class='p42-body'>"
+            f"<div class='p42-person-name'>{html.escape(str(k))}</div>"
+            f"<div class='p42-person-id'>Not an employee · tracked separately</div>"
+            f"<div style='margin-top:7px'>{_chip_html(view)}</div>"
+            f"<div class='p42-person-meta'>"
+            f"<div class='p42-row'><span>Last seen</span><span>{ls_s}</span></div>"
+            f"<div class='p42-row'><span>Session</span><span>{sess}</span></div>"
+            f"</div></div></div></div>"
+        )
+
+    if not cards:
+        st.html(_COMPONENT_CSS + "<div class='p42 p42-empty'>No tracked people right "
+                "now. Presence cards appear as soon as the daemon detects someone.</div>")
+        return
+    st.html(_COMPONENT_CSS + f"<div class='p42 cards'>{''.join(cards)}</div>")
+
+
+def _render_footer(role: str) -> None:
+    now = time.strftime("%H:%M:%S")
+    st.html(
+        _COMPONENT_CSS + f"""
+<div class='p42 p42-footer'>
+  <span>AI CCTV Intelligence · Security Operations Center</span>
+  <span>Role: {html.escape(role)}</span>
+  <span>Auto-refresh: {DASH_REFRESH_SEC}s</span>
+  <span>Snapshot rendered at {now}</span>
+  <span>Daemon: python main.py --source auto --headless --no-email</span>
+</div>
+"""
+    )
+
+
+def _show_kv_list(items: list) -> None:
+    """Render label/value pairs as compact read-only rows (settings page)."""
+    for label, value in items:
+        st.markdown(f"- **{label}:** {value}")
+
+
+def page_live_monitoring() -> None:
+    st.caption("Live camera status and people presence from the daemon snapshot — "
+               "real backend data only, refreshed with the rest of this page.")
+    live = load_live_state()
+    _render_snapshot_strip(live)
+    _render_camera_cards(live)
+    if live:
+        _render_people_cards(live)
+    tab_live_employees()
+    tab_ai_capabilities()
+
+
+# ======================================================================
 # TABS
 # ======================================================================
 
@@ -436,20 +969,13 @@ def tab_live_overview():
             "Start the daemon to resume live tracking:\n\n"
             "    python main.py --source auto --headless --no-email"
         )
+
+    _inject_shell_css()
+    _render_snapshot_strip(live)
     m = _live_overview_metrics(df_today, live)
 
-    has_data = not df_today.empty
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Recognised Today", f"{m['recognised']}" if has_data else "n/a")
-    c2.metric("Avg Productivity", f"{m['avg_pct']:.0f}%" if m['avg_pct'] else "n/a")
-    c3.metric("Active Hours Today", f"{m['total_active']:.1f}h" if has_data else "n/a")
-    c4.metric("Phone Today", f"{m['phone_mins']:.0f}m" if has_data else "n/a")
-
-    c5, c6, c7 = st.columns(3)
-    c5.metric("Currently Present", f"{m['present_now']}" if live else "n/a")
-    c6.metric("Cameras Online", f"{m['cams_online']}/{m['cams_total']}"
-              if m['cams_total'] else "n/a")
-    c7.metric("Unknown People", f"{m['unknown']}" if live else "n/a")
+    _render_kpi_row(live, m)
+    _render_analytics_row(df_today, m)
 
     st.subheader("Today's Productivity per Employee")
     if df_today.empty:
@@ -602,7 +1128,7 @@ def tab_live_employees():
                 h = cam_health[cid]
                 cam_rows.append({
                     "Camera": cid,
-                    "Source": h.get("source", "—"),
+                    "Source": _safe_cam_source(h.get("source", "—")),
                     "Health": h.get("health", "—"),
                     "Usable": "yes" if h.get("usable") else
                               ("n/a" if h.get("usable") is None else "no"),
@@ -615,8 +1141,16 @@ def tab_live_employees():
             st.dataframe(pd.DataFrame(cam_rows), width="stretch")
 
     if unknown:
-        st.caption(f":gray[+ {unknown} unknown person(s) currently seen (not attributed "
-                   "to any employee). Unknown faces never affect productivity.]")
+        from datetime import datetime as _dt
+        unk_labels = sorted({
+            (tr.get("identity_label") or tr.get("identity") or "")
+            for tr in ((live.get("ai", {}) or {}).get("spatial_tracks", {}) or {}).get("tracks", [])
+            if ((tr.get("identity_label") or tr.get("identity") or "") != "Unknown"
+                and "Unknown" in (tr.get("identity_label") or tr.get("identity") or ""))
+        })
+        st.caption(f":gray[{', '.join(unk_labels) if unk_labels else f'+ {unknown} unknown person(s)'} "
+                   f"currently seen (not attributed to any employee). "
+                   "Unknown faces never affect productivity.]")
     if not rows and not unknown:
         st.caption("Waiting for the first detection...")
 
@@ -840,7 +1374,7 @@ def tab_ai_capabilities():
         tr_rows.append({
             "Track": t.get("track_id"),
             "Cam": t.get("cam"),
-            "Identity": t.get("identity"),
+            "Identity": t.get("identity_label") or t.get("identity"),
             "Score": t.get("identity_score"),
             "Phone": ("yes" if t.get("phone") else "no"),
             "Phone Sec": t.get("phone_sec"),
@@ -1080,7 +1614,7 @@ def tab_security(role):
         st.info("No database found. Start the daemon to create it.")
         return
 
-    st.header("🛡 Security & Incidents")
+    st.header(":material/shield: Security & Incidents")
 
     live = load_live_state()
     security = live.get("security", {})
@@ -1173,7 +1707,7 @@ def tab_security(role):
 
     # --- Investigation workbench (Phase 32) ---
     st.divider()
-    st.subheader("🔎 Investigation Workbench")
+    st.subheader(":material/search: Investigation Workbench")
     try:
         from src import database as db
         from src.search import SecuritySearch
@@ -1329,7 +1863,7 @@ def tab_security(role):
 
     # --- Phase 33: advisory intelligence (read-only, evidence-based) ---
     st.divider()
-    with st.expander("🧠 Phase 33 — Advisory Intelligence (read-only)", expanded=False):
+    with st.expander(":material/psychology: Phase 33 — Advisory Intelligence (read-only)", expanded=False):
         try:
             from src import database as db
             from src.camera_intelligence import SystemHealth
@@ -1381,7 +1915,7 @@ def tab_security(role):
 
     # --- Phase 34: SOC operator view (attention queue, reconstruction, continuity) ---
     st.divider()
-    with st.expander("🎯 Phase 34 — SOC Operator View (read-only)", expanded=False):
+    with st.expander(":material/track_changes: Phase 34 — SOC Operator View (read-only)", expanded=False):
         try:
             from src import database as db
             from src.investigation import (IncidentReconstruction,
@@ -1483,44 +2017,90 @@ def tab_security(role):
 def tab_settings():
     import config
     st.header("Settings (read-only)")
+    st.caption("Configuration is environment-driven. All values below are "
+               "read-only — change them in the `.env` file / environment and "
+               "restart. Nothing here silently changes settings, and sensitive "
+               "values (SMTP password, RTSP credentials, dashboard passwords) "
+               "are never shown.")
 
-    def _row(label, value):
-        st.markdown(f"- **{label}:** {value}")
-
-    st.subheader("Working time")
-    _row("Working window", f"{WORK_SCHEDULE.get('start')} – {WORK_SCHEDULE.get('end')}")
-    _row("Unpaid lunch break", WORK_SCHEDULE.get("lunch"))
-    _row("End-of-day report hour", f"{config.EOD_REPORT_HOUR:02d}:00" if config.EOD_REPORT_HOUR else "disabled")
-
-    st.subheader("Recognition & performance")
-    _row("Face-detect size (px)", config.FACE_DETECT_SIZE)
-    _row("Target FPS per camera", config.TARGET_FPS_PER_CAMERA)
-    _row("Startup webcam wait (s)", config.STARTUP_FRAME_WAIT_SEC)
-    _row("Frame stale cutoff (s)", config.FRAME_STALE_SEC)
-    _row("Confidence threshold", config.CONF_THRESHOLD)
-    _row("Face similarity threshold", config.FACE_SIMILARITY_THRESHOLD)
-
-    st.subheader("Dashboard")
-    _row("Auto-refresh interval (s)", DASH_REFRESH_SEC)
-    _row("Login gate enabled", "yes" if _auth_enabled() else "no (open access)")
-
-    st.subheader("Phase 33 — Advisory Intelligence")
+    snapshot = {}
     try:
         snapshot = config.runtime_config_snapshot()
-        _row("Input source", snapshot.get("input_source"))
-        _row("Evidence mode", snapshot.get("evidence_mode"))
-        _row("Evidence retention (days)", snapshot.get("evidence_retention_days"))
-        _row("Correlation window (s)", snapshot.get("correlation_window_sec"))
-        _row("Temporal repeat threshold", snapshot.get("temporal_repeat_threshold"))
-        _row("Temporal escalate count", snapshot.get("temporal_escalate_count"))
-        _row("Temporal silence (days)", snapshot.get("temporal_silence_days"))
-        _row("Anomaly min samples", snapshot.get("anomaly_min_samples"))
-        _row("Anomaly z-score", snapshot.get("anomaly_zscore"))
-        _row("Risk scoring enabled", "yes" if snapshot.get("risk_enabled") else "no")
-        _row("Incident alert dedup (s)", snapshot.get("incident_alert_dedup_sec"))
-        _row("Reliability FPS target", snapshot.get("reliability_fps_target"))
-    except Exception as exc:
-        st.warning(f"Phase 33 config snapshot unavailable: {exc}")
+    except Exception as exc:  # pragma: no cover - surface gracefully
+        st.warning(f"Config snapshot unavailable: {exc}")
+
+    def _kv(label, value):
+        return (label, str(value))
+
+    with st.expander(":material/tune: General", expanded=True):
+        _show_kv_list([
+            _kv("Input source", snapshot.get("input_source", "auto")),
+            _kv("Evidence mode", snapshot.get("evidence_mode", config.EVIDENCE_MODE)),
+            _kv("Auto-refresh interval (s)", DASH_REFRESH_SEC),
+            _kv("Login gate enabled",
+                "yes" if _auth_enabled() else "no (open access, local dev)"),
+        ])
+
+    with st.expander(":material/videocam: Camera & Capture", expanded=False):
+        _show_kv_list([
+            _kv("Target FPS per camera", config.TARGET_FPS_PER_CAMERA),
+            _kv("Frame stale cutoff (s)", config.FRAME_STALE_SEC),
+            _kv("Startup webcam wait (s)", config.STARTUP_FRAME_WAIT_SEC),
+            _kv("Reliability FPS target", snapshot.get("reliability_fps_target")),
+        ])
+
+    with st.expander(":material/manage_search: Recognition & Detection", expanded=False):
+        _show_kv_list([
+            _kv("Face-detect size (px)", config.FACE_DETECT_SIZE),
+            _kv("Confidence threshold", config.CONF_THRESHOLD),
+            _kv("Face similarity threshold", config.FACE_SIMILARITY_THRESHOLD),
+        ])
+
+    with st.expander(":material/schedule: Scheduling & Productivity", expanded=False):
+        _show_kv_list([
+            _kv("Working window",
+                f"{WORK_SCHEDULE.get('start')} – {WORK_SCHEDULE.get('end')}"),
+            _kv("Unpaid lunch break", WORK_SCHEDULE.get("lunch")),
+            _kv("End-of-day report hour",
+                f"{config.EOD_REPORT_HOUR:02d}:00" if config.EOD_REPORT_HOUR else "disabled"),
+        ])
+
+    with st.expander(":material/security: Security & Privacy", expanded=False):
+        _show_kv_list([
+            _kv("Dashboard auth", "enabled" if _auth_enabled() else "open (dev)"),
+            _kv("Fail-closed mode", "on" if _auth_fail_closed() else "off"),
+            _kv("Session timeout (min)",
+                DASH_SESSION_MINUTES if DASH_SESSION_MINUTES > 0 else "never"),
+            _kv("Evidence retention (days)", snapshot.get("evidence_retention_days")),
+            _kv("Correlation window (s)", snapshot.get("correlation_window_sec")),
+            _kv("Risk scoring enabled", "yes" if snapshot.get("risk_enabled") else "no"),
+        ])
+
+    with st.expander(":material/notifications: Alerts & Notifications", expanded=False):
+        alert_rows = [
+            _kv("Incident alert dedup (s)", snapshot.get("incident_alert_dedup_sec")),
+            _kv("Temporal repeat threshold", snapshot.get("temporal_repeat_threshold")),
+            _kv("Temporal escalate count", snapshot.get("temporal_escalate_count")),
+            _kv("Temporal silence (days)", snapshot.get("temporal_silence_days")),
+            _kv("Anomaly min samples", snapshot.get("anomaly_min_samples")),
+            _kv("Anomaly z-score", snapshot.get("anomaly_zscore")),
+        ]
+        try:
+            es = last_email_status()
+            alert_rows.append(_kv("Email last delivery",
+                                  "sent" if es.get("ok") is True
+                                  else ("failed" if es.get("ok") is False else "no attempts")))
+        except Exception:  # pragma: no cover - email status may be unavailable
+            pass
+        _show_kv_list(alert_rows)
+
+    with st.expander(":material/dns: System & Storage", expanded=False):
+        _show_kv_list([
+            _kv("Embeddings registry present",
+                "yes" if Path(config.EMBEDDINGS_FILE).exists() else "no (not built yet)"),
+            _kv("Report output", str(REPORT_OUTPUT_DIR)),
+            _kv("Faces directory", str(FACES_DIR)),
+        ])
 
     st.divider()
     st.caption("System and secret configuration (SMTP password, RTSP credentials, "
@@ -1560,6 +2140,10 @@ def tab_deployment(role: str):
                 st.dataframe(df[show_cols], width="stretch", hide_index=True)
                 n_fail = len([r for r in results if r.status == r.FAIL])
                 n_warn = len([r for r in results if r.status == r.WARN])
+                n_pass = len([r for r in results if r.status == r.PASS])
+                n_skip = len([r for r in results if r.status == r.SKIP])
+                st.markdown(f":green[**PASS {n_pass}**] · :orange[WARN {n_warn}] · "
+                            f":red[FAIL {n_fail}] · :gray[SKIP {n_skip}]")
                 if n_fail:
                     st.error(f"{n_fail} FAIL item(s) -- resolve before pilot.")
                 elif n_warn:
@@ -1578,7 +2162,7 @@ def tab_deployment(role: str):
                      "NVIDIA GPU (with CUDA drivers) for accelerated inference"),
         ("OS", "Windows 10/11 or Linux; Python 3.10-3.12 (3.12 recommended)"),
         ("Runtime", "Set up the `.venv` with `setup_env.ps1`; verify `python -m pytest` "
-                    "passes (642 tests)"),
+                    "passes (full suite green)"),
         ("GPU / CUDA", "Only if hardware present: validate via `python -m src.preflight` "
                        "(GPU section); otherwise CPU fallback is used explicitly"),
         ("Cameras", "Enroll employee faces into `data/faces/EMPxxxx.jpg`; verify recognition "
@@ -1589,7 +2173,7 @@ def tab_deployment(role: str):
                     "evidence/backups grow over time"),
         ("Database", "WAL-mode SQLite auto-created; run `PRAGMA integrity_check` (see "
                      "backup/restore)"),
-        ("Models", "`yolov8n.pt` present; insightface (`buffalo_l`) installed; embeddings "
+        ("Models", "`yolo11n.pt` present; insightface (`buffalo_l`) installed; embeddings "
                    "rebuilt on enrollment"),
         ("SMTP", "Set real SMTP creds in `.env`; test with `main.py --test-email`"),
         ("Docker", "If containerised: `docker compose up -d --build`; verify healthchecks; "
@@ -1619,7 +2203,8 @@ def main():
     if not role:
         return
 
-    st.title("CCTV Employee Productivity Dashboard")
+    _inject_shell_css()
+    _render_topbar(role)
 
     with st.sidebar:
         st.markdown(f"**Role:** {role}")
@@ -1627,65 +2212,53 @@ def main():
             st.write("Full access")
         else:
             st.write("View-only (monitoring, analytics, reports)")
-        if st.button("Log out"):
+        st.divider()
+        st.markdown("<span class='p42-nav-label'>Navigation</span>",
+                    unsafe_allow_html=True)
+        choice = st.radio("cctv_nav", _NAV_LABELS, key="p42_nav",
+                          label_visibility="collapsed")
+        st.divider()
+        if st.button(":material/refresh: Refresh now", key="p42_refresh"):
+            st.rerun()
+        if st.button(":material/logout: Log out", key="p42_logout"):
             st.session_state.pop("cctv_role", None)
             st.session_state.pop("cctv_login_ts", None)
             st.rerun()
         st.divider()
+        snap = _snapshot_status(load_live_state())
+        st.caption(f"Snapshot: {snap['label']} · {snap['iso']}"
+                   + (f" · {snap['age']:.0f}s ago"
+                      if isinstance(snap["age"], (int, float)) else ""))
         st.caption(f"Auto-refresh: {DASH_REFRESH_SEC}s")
 
-    tabs = st.tabs([
-        "📈 Live Overview",
-        "🧑‍💼 Live Employees",
-        "📊 Historical",
-        "📷 Camera Health",
-        "🤖 AI Capabilities",
-        "🛡 Security",
-        "📄 Reports",
-        "👥 Employees",
-        "⚙ Settings",
-        "🚀 Deploy & System Check",
-    ])
-
-    live_tabs = (tab_live_overview, tab_live_employees, tab_camera_health)
-    analy_tabs = (tab_historical, tab_reports)
-
-    # Wrap the three "live" tabs in auto-refreshing fragments.
-    with tabs[0]:
+    page = _NAV_KEYS[choice]
+    if page == "dashboard":
         if DASH_REFRESH_SEC:
             _auto_fragment(tab_live_overview, DASH_REFRESH_SEC)
         else:
             tab_live_overview()
-    with tabs[1]:
+    elif page == "live":
         if DASH_REFRESH_SEC:
-            _auto_fragment(tab_live_employees, DASH_REFRESH_SEC)
+            _auto_fragment(page_live_monitoring, DASH_REFRESH_SEC)
         else:
-            tab_live_employees()
-    with tabs[2]:
-        tab_historical()
-    with tabs[3]:
-        if DASH_REFRESH_SEC:
-            _auto_fragment(tab_camera_health, DASH_REFRESH_SEC)
-        else:
-            tab_camera_health()
-    with tabs[4]:
-        if DASH_REFRESH_SEC:
-            _auto_fragment(tab_ai_capabilities, DASH_REFRESH_SEC)
-        else:
-            tab_ai_capabilities()
-    with tabs[5]:
+            page_live_monitoring()
+    elif page == "employees":
+        tab_employees(role)
+    elif page == "security":
         if DASH_REFRESH_SEC:
             _auto_fragment(tab_security, DASH_REFRESH_SEC, role)
         else:
             tab_security(role)
-    with tabs[6]:
+    elif page == "reports":
         tab_reports(role)
-    with tabs[7]:
-        tab_employees(role)
-    with tabs[8]:
+    elif page == "analytics":
+        tab_historical()
+    elif page == "settings":
         tab_settings()
-    with tabs[9]:
+    else:
         tab_deployment(role)
+
+    _render_footer(role)
 
 
 def _auto_fragment(func, every: float, *args):

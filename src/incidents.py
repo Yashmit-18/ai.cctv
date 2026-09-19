@@ -134,6 +134,46 @@ class IncidentEngine:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    #: Phase 54 M05 -- advisory lifecycle events that *self-heal* their own
+    #: condition.  When such an event fires for an incident that is itself only
+    #: INFO severity (never HIGH/CRITICAL), the incident is auto-resolved with
+    #: a full audit trail instead of accumulating forever as OPEN.
+    ADVISORY_SELF_CLOSING_EVENTS = {"CAMERA_RECOVERED"}
+
+    def auto_close_advisory(self, event_dict: dict,
+                            incident_id: str | None = None,
+                            actor: str = "system") -> bool:
+        """Phase 54 M05 -- auto-close a matched INFO advisory incident.
+
+        Called right after an event is bound/attached to an incident.  Only a
+        :data:`ADVISORY_SELF_CLOSING_EVENTS` event type can trigger it, and it
+        only ever resolves an incident whose own severity is ``INFO`` -- a
+        HIGH/CRITICAL incident (e.g. a CAMERA_OFFLINE that a CAMERA_RECOVERED
+        correlated onto) is left OPEN for human review.  Every auto-close
+        writes the same ``incident.resolved`` audit record as a manual resolve,
+        so the lifecycle stays explicit and trackable.
+        """
+        ev_type = event_dict.get("event_type")
+        if ev_type not in self.ADVISORY_SELF_CLOSING_EVENTS:
+            return False
+        inc_id = incident_id or event_dict.get("incident_id")
+        if not inc_id:
+            return False
+        inc = db.get_incident(self._conn, inc_id)
+        if not inc or inc["status"] in ("RESOLVED", "DISMISSED"):
+            return False
+        if (inc.get("severity") or "INFO") != "INFO":
+            return False
+        ts = event_dict.get("timestamp") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        notes = f"auto-closed by {ev_type} at {ts}"
+        ok = self.resolve(inc_id, actor=actor, notes=notes)
+        if ok:
+            logger.info(
+                "[AUTO-CLOSE] incident=%s closed by %s (INFO advisory "
+                "self-healing lifecycle); no human review required.",
+                inc_id, ev_type)
+        return ok
+
     def acknowledge(self, incident_id: str, actor: str = "system",
                     *, _no_audit: bool = False) -> bool:
         inc = db.get_incident(self._conn, incident_id)

@@ -224,9 +224,23 @@ def check_models() -> list[CheckResult]:
         else:
             results.append(CheckResult("MODELS", "yolo", CheckResult.FAIL,
                                        detail=f"Not found: {model_path}",
-                                       remedy="Run: python -c 'from ultralytics import YOLO; YOLO(\"yolov8n.pt\")'"))
+                                       remedy="Run: python -c 'from ultralytics import YOLO; YOLO(\"yolo11n.pt\")'"))
     except Exception as exc:
         results.append(CheckResult("MODELS", "yolo", CheckResult.SKIP,
+                                   detail=str(exc)))
+
+    # Phase 46: ONNX Runtime provider detection (ReID / InsightFace).
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        results.append(CheckResult("MODELS", "onnx_providers", CheckResult.PASS,
+                                   detail=", ".join(providers)))
+    except ImportError:
+        results.append(CheckResult("MODELS", "onnx_providers", CheckResult.WARN,
+                                   detail="onnxruntime not installed",
+                                   remedy="pip install onnxruntime"))
+    except Exception as exc:
+        results.append(CheckResult("MODELS", "onnx_providers", CheckResult.SKIP,
                                    detail=str(exc)))
 
     try:

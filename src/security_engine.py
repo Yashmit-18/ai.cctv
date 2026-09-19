@@ -517,6 +517,12 @@ class SecurityEngine:
             ev.get("camera"), ev.get("zone"), correlate_reason,
         )
 
+        # Phase 54 M05 -- advisory auto-close.  A lifecycle event that self-heals
+        # its own condition (e.g. CAMERA_RECOVERED after CAMERA_OFFLINE) may
+        # close an *INFO-severity advisory* incident; the engine refuses to
+        # auto-resolve anything HIGH/CRITICAL (human review stays mandatory).
+        safe_call(self._incidents.auto_close_advisory, ev, inc_id)
+
         # Structured log
         logger.info(
             "[SECURITY] %s camera=%s zone=%s severity=%s incident=%s confidence=%.2f",

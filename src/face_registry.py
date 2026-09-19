@@ -30,7 +30,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from config import EMBEDDINGS_FILE, FACE_MODEL, FACE_SIMILARITY_THRESHOLD, FACES_DIR
+from config import (EMBEDDINGS_FILE, FACE_CANDIDATE_THRESHOLD, FACE_MODEL,
+                    FACE_SIMILARITY_THRESHOLD, FACES_DIR)
 import config  # noqa: E402  (module-level settings incl. FACE_CONFUSABILITY_MAX)
 
 logger = logging.getLogger("cctv.face_registry")
@@ -40,9 +41,20 @@ FACES_DIR = Path(FACES_DIR) if not isinstance(FACES_DIR, Path) else FACES_DIR
 EMBEDDINGS_FILE = Path(EMBEDDINGS_FILE) if not isinstance(EMBEDDINGS_FILE, Path) else EMBEDDINGS_FILE
 
 FACE_ANALYSIS_MODEL = FACE_MODEL
-RECOGNITION_THRESHOLD = FACE_SIMILARITY_THRESHOLD
+RECOGNITION_THRESHOLD = FACE_SIMILARITY_THRESHOLD  # CONFIRM cutoff
+CANDIDATE_THRESHOLD = FACE_CANDIDATE_THRESHOLD     # tentative/candidate floor
+MARGIN_MIN = float(getattr(config, "FACE_MARGIN_MIN", 0.06))
 EMBEDDING_DIM = 512
 CACHE_VERSION = 3
+
+# Face-decision statuses (Phase 44B).  A per-frame decision is one of these:
+#   CONFIRMED -- best score >= RECOGNITION_THRESHOLD and margin >= MARGIN_MIN.
+#   CANDIDATE -- best score >= CANDIDATE_THRESHOLD but not CONFIRMED; may aid
+#                adoption on tracks with no trusted identity, never demotes.
+#   UNKNOWN   -- below the candidate floor (or malformed embedding).
+RECOG_CONFIRMED = "CONFIRMED"
+RECOG_CANDIDATE = "CANDIDATE"
+RECOG_UNKNOWN = "UNKNOWN"
 
 # Registry tuning
 MIN_FACE_AREA = 120 * 120       # skip tiny/low quality crops
@@ -136,11 +148,36 @@ class FaceRegistry:
                 self._load_cache()
                 logger.info("Loaded %d face embeddings from cache.",
                             len(self._employee_ids))
+                self._log_summary()
                 return
             except Exception as exc:
                 logger.warning("Cache load failed (%s); rebuilding.", exc)
 
         self._build_from_images()
+        self._log_summary()
+
+    def _log_summary(self):
+        """Startup diagnostic: one line per enrolled employee (id + name +
+        embedding count) and any face files that did not contribute.
+
+        Emits names and counts ONLY -- never raw embeddings or similarity
+        values, so this stays safe for production logs.
+        """
+        if not self._by_employee:
+            logger.info("Face registry summary: no employees enrolled.")
+            return
+        names = _employee_names()
+        for eid in sorted(self._by_employee):
+            logger.info(
+                "Face registry summary: %s (%s) -> %d embedding(s)",
+                eid, names.get(eid) or "(no name in DB)", len(self._by_employee[eid]))
+        skipped = [k for k, s in self._file_status.items()
+                   if _employee_id_from_stem(k) not in self._by_employee]
+        if skipped:
+            logger.warning(
+                "Face registry summary: %d face file(s) registered no usable "
+                "embedding (likely junk/duplicate/non-canonical): %s",
+                len(skipped), sorted(skipped))
 
     def _load_cache(self):
         with open(EMBEDDINGS_FILE, "rb") as f:
@@ -158,6 +195,8 @@ class FaceRegistry:
         embs = np.array(data["embeddings"], dtype=np.float32)
         if embs.ndim == 1:
             embs = embs.reshape(1, -1)
+        if len(self._employee_ids) != len(embs):
+            raise ValueError("cache id/embedding pairing corrupted; rebuilding")
         if embs.shape[-1] != EMBEDDING_DIM:
             raise ValueError("embedding dimension mismatch; rebuilding")
         self._embeddings = embs
@@ -389,6 +428,69 @@ class FaceRegistry:
         sims = sims.flatten()
         order = np.argsort(-sims)[:k]
         return [(self._employee_ids[i], float(sims[i])) for i in np.atleast_1d(order)]
+
+    def identify_candidate(self, face_embedding: np.ndarray) -> dict:
+        """Phase 44B gated face decision (CONFIRMED / CANDIDATE / UNKNOWN).
+
+        Two-tier decision that separates a *tentative match* from a *usable
+        recognition*:
+
+        * CONFIRMED -- best score >= ``RECOGNITION_THRESHOLD`` (0.60) AND the
+          margin to the runner-up identity >= ``MARGIN_MIN`` (0.06).  The
+          identity is trustworthy enough to adopt/switch a track.
+        * CANDIDATE -- best score >= ``CANDIDATE_THRESHOLD`` (0.50) but not
+          CONFIRMED (too weak, or the gallery cannot separate the top two for
+          this frame).  Callers may use it to *adopt* a track that has no
+          trusted identity yet, but never to demote or switch a trusted id.
+        * UNKNOWN  -- below the candidate floor (or malformed/empty input).
+
+        Returns a dict::
+
+          {"emp_id": str, "score": float, "margin": float, "second_id": str|None,
+           "status": "CONFIRMED"|"CANDIDATE"|"UNKNOWN"}
+
+        ``emp_id``/``second_id`` are gallery ids; on UNKNOWN ``emp_id`` is
+        ``"Unknown"`` and ``second_id`` is ``None``.  ``margin`` is
+        ``best - second`` for multi-identity galleries, else ``best`` (a single
+        enrolled identity always carries its full score as margin).  Raw
+        embeddings are never returned.
+        """
+        if self._embeddings is None or len(self._employee_ids) == 0:
+            return {"emp_id": "Unknown", "score": 0.0, "margin": 0.0,
+                    "second_id": None, "status": RECOG_UNKNOWN}
+
+        query = face_embedding.astype(np.float32)
+        if query.ndim == 1:
+            query = query.reshape(1, -1)
+        if query.shape[-1] != EMBEDDING_DIM or not np.isfinite(query).all():
+            return {"emp_id": "Unknown", "score": 0.0, "margin": 0.0,
+                    "second_id": None, "status": RECOG_UNKNOWN}
+
+        sims = (self._embeddings @ query.T).flatten()
+        best_idx = int(np.argmax(sims))
+        best_score = float(sims[best_idx])
+        best_id = self._employee_ids[best_idx]
+
+        if best_score < CANDIDATE_THRESHOLD:
+            return {"emp_id": "Unknown", "score": round(best_score, 4),
+                    "margin": 0.0, "second_id": None, "status": RECOG_UNKNOWN}
+
+        if len(self._employee_ids) > 1:
+            second_idx = int(np.argpartition(sims, -2)[-2])
+            second_score = float(sims[second_idx])
+            margin = best_score - second_score
+            second_id = self._employee_ids[second_idx]
+        else:
+            second_score = 0.0
+            margin = best_score
+            second_id = None
+
+        status = RECOG_CONFIRMED
+        if best_score < RECOGNITION_THRESHOLD or margin < MARGIN_MIN:
+            status = RECOG_CANDIDATE
+        return {"emp_id": best_id, "score": round(best_score, 4),
+                "margin": round(margin, 4), "second_id": second_id,
+                "status": status}
 
     def employee_name(self, employee_id: str) -> str:
         """Human name for ``employee_id`` from the employees DB (never the

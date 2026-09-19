@@ -52,10 +52,10 @@ from config import (
     MODEL_PATH,
     PROJECT_ROOT,
     REPORT_OUTPUT_DIR,
+    RETENTION_DAYS_BIOMETRICS,
     RETENTION_DAYS_LOGS,
     RETENTION_DAYS_REPORTS,
     STARTUP_FRAME_WAIT_SEC,
-    TARGET_FPS_PER_CAMERA,
     WORK_SCHEDULE,
     setup_logging,
     validate_config,
@@ -289,6 +289,18 @@ def draw_dashboard(display, employee_ids, states, telemetry, fps, cam_online, ca
 _LIVE_STATE_FILE = os.path.join(config.PROJECT_ROOT, "data", "live_state.json")
 
 
+# Phase 54 -- runtime visibility (M02).  A failed live-state write used to be
+# swallowed silently, leaving the dashboard stale with no signal.  The writer
+# now logs the first failure immediately (traceback) and then rate-limited
+# while the outage persists; a successful write after failures logs the
+# recovery once.  The writer is still best-effort: it never raises and never
+# blocks the loop.
+_LIVE_STATE_FAILURES = 0
+_LIVE_STATE_RECOVERED = False
+_LIVE_STATE_LAST_ERROR_AT = 0.0
+_LIVE_STATE_ERROR_RATE_LIMIT_SEC = 30.0
+
+
 def _write_live_state(states: dict, telemetry: dict, cam_health: dict, fps: float,
                       sources: dict | None = None, durations: dict | None = None,
                       security: dict | None = None, names: dict | None = None,
@@ -296,10 +308,15 @@ def _write_live_state(states: dict, telemetry: dict, cam_health: dict, fps: floa
                       last_detection_sec: float | None = None,
                       spatial: dict | None = None, motion: dict | None = None,
                       camera_selection: dict | None = None,
-                      ai_capabilities: dict | None = None):
+                      ai_capabilities: dict | None = None,
+                      phone_diag: dict | None = None,
+                      timing: dict | None = None,
+                      reid: dict | None = None):
     """Persist a small JSON snapshot for the dashboard live view.
 
-    Never blocks; failures are ignored (dashboard handles absence).
+    Best-effort: never raises, never blocks.  On failure the previous snapshot
+    is left intact (dashboard handles absence/staleness) and the error is
+    logged loudly rather than swallowed (Phase 54 M02).
 
     When *names* and *last_seen* are provided the payload includes a rich
     ``employees`` mapping keyed by employee id.  Each entry carries the human
@@ -310,6 +327,7 @@ def _write_live_state(states: dict, telemetry: dict, cam_health: dict, fps: floa
     session).  The ``Unknown`` sentinel is excluded from this mapping -- the
     dashboard tracks it via ``states`` directly.
     """
+    global _LIVE_STATE_FAILURES, _LIVE_STATE_RECOVERED, _LIVE_STATE_LAST_ERROR_AT
     try:
         all_states = states or {}
         all_telemetry = telemetry or {}
@@ -365,6 +383,9 @@ def _write_live_state(states: dict, telemetry: dict, cam_health: dict, fps: floa
                 "motion": motion or {},
                 "camera_selection": camera_selection or {},
                 "capabilities": ai_capabilities or {},
+                "phone_diag": phone_diag or {},
+                "pipeline_timing": timing or {},
+                "reid": reid or {},
             },
         }
         os.makedirs(os.path.dirname(_LIVE_STATE_FILE), exist_ok=True)
@@ -373,7 +394,25 @@ def _write_live_state(states: dict, telemetry: dict, cam_health: dict, fps: floa
             json.dump(payload, f)
         os.replace(tmp, _LIVE_STATE_FILE)
     except Exception:
-        pass
+        _LIVE_STATE_FAILURES += 1
+        now = time.time()
+        # First failure always carries a traceback; repeats are rate-limited so
+        # a persistent fault can never flood the log, only report degradation.
+        rate_ok = (now - _LIVE_STATE_LAST_ERROR_AT) >= _LIVE_STATE_ERROR_RATE_LIMIT_SEC
+        if _LIVE_STATE_FAILURES == 1 or rate_ok:
+            _LIVE_STATE_LAST_ERROR_AT = now
+            logger.error(
+                "live-state write FAILED (%d consecutive; dashboard will go "
+                "stale until this recovers); last good snapshot preserved",
+                _LIVE_STATE_FAILURES,
+                exc_info=(_LIVE_STATE_FAILURES == 1))
+        _LIVE_STATE_RECOVERED = False
+    else:
+        if _LIVE_STATE_FAILURES > 0:
+            logger.warning(
+                "live-state write recovered after %d failures.",
+                _LIVE_STATE_FAILURES)
+        _LIVE_STATE_FAILURES = 0
 
 
 def _maybe_log_pilot_metrics(cam_health: dict, fps: float, detector: "ActivityDetector | None"):
@@ -531,7 +570,7 @@ def _usable_camera_frames(frames: dict, health: dict[str, dict]) -> dict:
 
 
 def _print_demo_banner(cameras: dict, device: str, enrolled: int,
-                       face_images: int) -> None:
+                       face_images: int, target_fps: int) -> None:
     """Print a concise, demo-friendly startup block (webcam mode only).
 
     Deliberately free of secrets: ``cameras`` values are device indices in
@@ -546,7 +585,7 @@ def _print_demo_banner(cameras: dict, device: str, enrolled: int,
     print(f"Camera:            {cam_id}")
     print(f"Video device:      {index}")
     print(f"Inference device:  {device}")
-    print(f"Target FPS:        {TARGET_FPS_PER_CAMERA}")
+    print(f"Target FPS:        {target_fps}")
     print(f"Employees enrolled:{enrolled_label}  (face images on disk: {face_images})")
     if not enrolled:
         print("Enrollment:  none enrolled yet -- add photos in data/faces and")
@@ -678,6 +717,34 @@ def _maybe_run_retention(conn):
     except Exception as exc:  # noqa: BLE001
         logger.warning("Retention (evidence) skipped: %s", exc)
 
+    # Phase 54 -- biometric cache retention (M06).  Only the *rebuildable*
+    # mean-embedding caches (``data/embeddings.pkl`` face, ``data/appearance.pkl``
+    # ReID) are pruned when ``CCTV_RETENTION_BIOMETRICS_DAYS>0`` AND retention is
+    # enabled.  Enrollment images under ``data/faces/`` / ``data/reid/`` are the
+    # source of truth and are NEVER touched -- a cache removed here is rebuilt
+    # from those images on the next build.
+    if RETENTION_DAYS_BIOMETRICS > 0:
+        try:
+            cutoff = date.today().toordinal() - RETENTION_DAYS_BIOMETRICS
+            pruned = []
+            for cache_path in (config.EMBEDDINGS_FILE, config.APPEARANCE_EMBEDDINGS_FILE):
+                if not os.path.isfile(cache_path):
+                    continue
+                try:
+                    if date.fromtimestamp(os.path.getmtime(cache_path)).toordinal() < cutoff:
+                        os.remove(cache_path)
+                        pruned.append(os.path.basename(cache_path))
+                except OSError:
+                    continue
+            if pruned:
+                logger.warning(
+                    "Retention (biometrics): pruned rebuildable caches older "
+                    "than %d days: %s (enrollment images in data/faces and "
+                    "data/reid are untouched and can rebuild them)",
+                    RETENTION_DAYS_BIOMETRICS, ", ".join(pruned))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Retention (biometrics) skipped: %s", exc)
+
 
 _LAST_BACKUP_DAY: str | None = None
 
@@ -710,6 +777,15 @@ def generate_and_maybe_email(conn, hint: str, email_on_complete: bool = False,
     day = day or date.today()
     try:
         p = generate_daily_report(conn, day)
+        # Phase 54 M07 -- report/EOD continuity.  eod_state must never claim a
+        # day's report exists unless the xlsx is really on disk (the historical
+        # 09-01 "EOD entry without a file" gap).  A report path that does not
+        # exist is treated as a failed generation and left unmarked.
+        if not (p and os.path.isfile(p)):
+            logger.error("Report generation (%s) produced no file (%r); EOD "
+                         "state for %s NOT marked done.", hint, p,
+                         day.isoformat())
+            return None
         logger.info("Report generated (%s) -> %s", hint, p)
         _mark_report_done(day.isoformat(), True, False)
         sent = False
@@ -725,6 +801,44 @@ def generate_and_maybe_email(conn, hint: str, email_on_complete: bool = False,
     except Exception as err:
         logger.error("Report generation FAILED (%s): %s", hint, err)
         return None
+
+
+def _reconcile_eod_state() -> dict:
+    """Phase 54 M07 -- log report/EOD-state continuity mismatches.
+
+    Read-only reconciler: it never fabricates a missing xlsx and never edits
+    (or deletes) eod_state.  It surfaces two historical gap classes so an
+    operator sees them instead of silent divergence:
+
+    * a day marked ``report_generated`` in ``eod_state.json`` with no matching
+      ``data/reports/daily_report_<day>.xlsx``;
+    * an on-disk report with no ``eod_state`` entry (on-demand generation).
+
+    Runs once at daemon startup.
+    """
+    state = _load_eod_state()
+    xlsx_days: set[str] = set()
+    try:
+        for name in os.listdir(REPORT_OUTPUT_DIR):
+            if name.startswith("daily_report_") and name.endswith(".xlsx"):
+                xlsx_days.add(name[len("daily_report_"):-len(".xlsx")])
+    except OSError as exc:
+        logger.warning("EOD reconcile skipped (reports dir unreadable): %s", exc)
+        return {"state_days": len(state), "xlsx_days": 0}
+    for day in sorted(state):
+        if state.get(day, {}).get("report_generated") and day not in xlsx_days:
+            logger.warning(
+                "EOD reconcile: eod_state marks %s report_generated but "
+                "daily_report_%s.xlsx is missing (pruned or failed write); "
+                "state kept as-is, file not fabricated.", day, day)
+    for day in sorted(xlsx_days):
+        if not state.get(day, {}).get("report_generated"):
+            logger.info(
+                "EOD reconcile: daily_report_%s.xlsx exists with no eod_state "
+                "entry (on-demand run); a future run marks it.", day)
+    logger.debug("EOD reconcile: %d state days, %d xlsx days.",
+                 len(state), len(xlsx_days))
+    return {"state_days": len(state), "xlsx_days": len(xlsx_days)}
 
 
 # ======================================================================
@@ -823,7 +937,8 @@ class EODScheduler:
 # Main run loop
 # ======================================================================
 
-def _step_detector(detector, frames, load_detector):
+def _step_detector(detector, frames, load_detector,
+                   reid_gate_boxes: dict[str, list] | None = None):
     """Load-or-detect for one frame-processing step.
 
     Always returns ``(detector, detections)`` with ``detections`` defined -- a
@@ -837,13 +952,18 @@ def _step_detector(detector, frames, load_detector):
     failure).  A detector-load failure keeps the FSM frozen (empty detections);
     a ``detect_batch`` failure is isolated and degrades to empty detections --
     neither fabricates employee absence.
+
+    ``reid_gate_boxes`` (optional) is forwarded to
+    ``detector.detect_batch(reid_gate_boxes=...)`` -- the opt-in event-driven
+    ReID cadence (``CCTV_REID_GATE_RESOLVED=1``).
     """
     detections: list[dict] = []
     if detector is None:
         detector = load_detector()
     if detector is not None:
         try:
-            detections = detector.detect_batch(frames)
+            detections = detector.detect_batch(
+                frames, reid_gate_boxes=reid_gate_boxes)
         except Exception as err:
             logger.exception("Detector batch failed (isolated): %s", err)
             logger.warning("Detection degraded for this step; "
@@ -851,6 +971,38 @@ def _step_detector(detector, frames, load_detector):
                            "frozen -- no fake absence.")
             detections = []
     return detector, detections
+
+
+def _merge_person_claims(detections: list[dict],
+                         claims: dict[str, dict[str, object]]) -> list[dict]:
+    """Attach spatial per-person presence+phone claims into the detection list.
+
+    Phase 43 Part B/D bridge.  ``claims`` maps an ADOPTED spatial identity
+    (from YOLO *body* persistence -- any pose, face visible or not) to its
+    presence and phone flags.  Each claim becomes a minimal detection entry so
+    ``MultiTracker.process_batch``/``EmployeeTracker`` see the employee as
+    present and (when the specific track reports a phone) on-phone.
+
+    Semantics preserved:
+    * person != face -- presence comes from the body box, not a recognised face;
+    * phone is attributed from the ONE track that holds that identity (per
+      person, never a global ``phone_detected`` flag);
+    * a claim never invents an identity (unresolved tracks are not claimed);
+    * claims are additive -- the tracker dedup merges/ORs them with any
+      face-derived statuses already present this cycle.
+    """
+    if not claims:
+        return detections
+    out = list(detections)
+    for emp_id, claim in claims.items():
+        out.append({
+            "emp_id": emp_id,
+            "cam": claim.get("cam", ""),
+            "present": True,
+            "phone": bool(claim.get("phone", False)),
+            "spatial_fallback": True,
+        })
+    return out
 
 
 def run(args: argparse.Namespace | None = None):
@@ -892,6 +1044,9 @@ def run(args: argparse.Namespace | None = None):
     # multi-camera pool and drive the requested video device as a single
     # logical camera.
     is_local = bool(args.source)
+    # Phase 45: single local sources get the faster loop cap (see
+    # config.effective_target_fps -- always overridable by CCTV_TARGET_FPS).
+    _target_fps_eff = config.effective_target_fps(local_source=is_local)
     if args.source:
         raw_source = str(args.source).strip().lower()
         if raw_source == "auto":
@@ -908,7 +1063,11 @@ def run(args: argparse.Namespace | None = None):
             cameras = {"local_webcam": cam_index}
         camera_label = f"local source '{args.source}' (video device {cam_index})"
     elif not CAMERAS:
-        logger.error("No cameras configured. Add CAMERAS to config.py.")
+        logger.error(
+            "No cameras configured. Set CCTV_CAM_<NN>_URL in .env for an RTSP "
+            "pool, or run `main.py --source <index>` (e.g. 0) for a single "
+            "local webcam, then validate with `python -m src.preflight` "
+            "before retrying this run.")
         return
     else:
         cameras = CAMERAS
@@ -927,12 +1086,17 @@ def run(args: argparse.Namespace | None = None):
     conn = get_connection(DB_PATH)
     init_db(conn)
     _maybe_run_retention(conn)   # opt-in; applies once per day (see env)
+    _reconcile_eod_state()        # Phase 54 M07 -- report/EOD continuity log
     tracker = MultiTracker(conn)
 
     # -- Phase A: spatial person tracking (A5/A6), motion (A8), entry/exit
     # (A10).  Strictly additive layers over the detector's per-person entries;
     # failures here degrade gracefully without touching the employee FSM.
-    spatial = SpatialTracker()
+    spatial = SpatialTracker(
+        phone_window=config.PHONE_EVIDENCE_WINDOW,
+        phone_min=config.PHONE_EVIDENCE_MIN,
+        appear_adopt_frames=config.REID_ADOPT_FRAMES,
+    )
     motion = MotionDetector(
         enabled=config.MOTION_ENABLED,
         min_score=config.MOTION_MIN_SCORE,
@@ -987,6 +1151,7 @@ def run(args: argparse.Namespace | None = None):
             cameras, resolved_device,
             enrolled=sum(1 for e in employees.list() if e.enrolled),
             face_images=_count_face_images(),
+            target_fps=_target_fps_eff,
         )
         _resolution_reported = False
 
@@ -1002,6 +1167,7 @@ def run(args: argparse.Namespace | None = None):
                 conf=CONF_THRESHOLD,
                 device=resolved_device,
                 face_detect_size=config.FACE_DETECT_SIZE,
+                face_cadence=config.FACE_DETECT_CADENCE,
             )
             try:
                 employees.sync_enrolled(d.face_registry.enrolled_employee_ids)
@@ -1028,8 +1194,13 @@ def run(args: argparse.Namespace | None = None):
     dark_frames: dict[str, int] = {}
     step_count = 0
     last_detection_at = None
+    # Part F: opt-in per-stage loop timing, smoothed as an EMA and published
+    # into live_state["ai"]["pipeline_timing"] so dashboard lag is attributable
+    # to the right stage.  Zero overhead when CCTV_PIPELINE_TIMING=0.
+    timing_ema: dict[str, float] = {}
+    timing_n = 0
 
-    interval = MultiCameraManager.frame_interval(TARGET_FPS_PER_CAMERA)
+    interval = MultiCameraManager.frame_interval(_target_fps_eff)
 
     scheduler = EODScheduler(
         conn_factory=lambda: get_connection(DB_PATH),
@@ -1049,6 +1220,17 @@ def run(args: argparse.Namespace | None = None):
     # disabled security processing in production.
     try:
         while True:
+            # Part F timing anchors (opt-in).  t_capture/t_detect/t_state track
+            # the major stages; live-state seconds are measured around the write.
+            t_total = time.time()
+            t_capture = t_total
+            t_detect = t_capture
+            t_state = t_detect
+            # Phase 45: per-cycle itemized windows folded into the published
+            # EMA when CCTV_PIPELINE_TIMING=1 (zero cost otherwise).
+            t_track0 = t_track1 = t_capture
+            t_db0 = t_db1 = t_capture
+            t_events0 = t_events1 = t_capture
             # -- Round-robin throttle + usable-camera gating ----------------
             # Pull at most ``batch_size`` fresh frames, then drop any that must
             # not drive employee state: dead/no-frame health and blank/dark
@@ -1058,6 +1240,7 @@ def run(args: argparse.Namespace | None = None):
             frames = cams.latest_frames(limit=batch_size)
             frames = _usable_camera_frames(frames, health)
             camera_online = bool(frames)
+            t_capture = time.time()
 
             # -- CAMERA_DEBUG: structured per-loop diagnostics ---------------
             # Rate-limited so the log stays readable; gated on the same
@@ -1118,23 +1301,73 @@ def run(args: argparse.Namespace | None = None):
             # unusable.  Detection is deliberately skipped in that case, and
             # the employee tracker remains frozen below.
             detections = []
+            tracks = []
             if frames:
+                # -- Phase 49 OPT-IN event-driven ReID cadence ----------------
+                # When CCTV_REID_GATE_RESOLVED=1 the appearance pass skips
+                # person boxes already resolved to a face identity (previous
+                # spatial cycle).  A face-resolved track can never be changed
+                # by appearance votes, so that model inference is pure waste.
+                # Default OFF: production behaviour is unchanged until the
+                # real-camera latency measurements justify enabling it.
+                reid_gate_boxes = None
+                if config.REID_GATE_RESOLVED and spatial is not None:
+                    reid_gate_boxes = {}
+                    try:
+                        for _t in spatial.active_tracks():
+                            if getattr(_t, "identity", None) in (None, "Unknown"):
+                                continue
+                            if getattr(_t, "identity_source", None) != "face":
+                                continue
+                            bb = getattr(_t, "bbox", None)
+                            cam = getattr(_t, "cam", None)
+                            if bb is not None and cam is not None:
+                                reid_gate_boxes.setdefault(cam, []).append(
+                                    tuple(float(v) for v in bb))
+                    except Exception:
+                        logger.exception("reid gate lookup failed; running "
+                                         "ungated this cycle")
+                        reid_gate_boxes = None
                 # Backend load-or-detect for this step.  Guarantees a defined
                 # (possibly empty) `detections` list every iteration, including
                 # the first successful detector load.  `detector` is rebound to
                 # the returned value so a just-created detector persists.
                 detector, detections = _step_detector(
-                    detector, frames, _load_detector)
+                    detector, frames, _load_detector,
+                    reid_gate_boxes=reid_gate_boxes)
+
+                # -- Phase A (spatial) runs FIRST so per-person claims can feed
+                # the employee FSM below.  Still strictly isolated: a failure
+                # here only costs this cycle's claims, never the pipeline.
+                try:
+                    t_track0 = time.time()
+                    spatial.process(detections)
+                    tracks = spatial.active_tracks()
+                except Exception as _st:
+                    logger.warning("Spatial tracking skipped (isolated): %s", _st)
+
+                # -- Part B/D bridge: body-level presence, not face-level. ----
+                # A known employee whose face is hidden (side/back pose) still
+                # has a fresh spatial track holding their adopted identity.
+                # Merge that track's presence + phone into the detection list
+                # BEFORE the FSM consumes it -- person != face, and phone is
+                # attributed from that ONE track only (strictly per person).
+                try:
+                    claims = spatial.claims() if spatial is not None else {}
+                except Exception:
+                    claims = {}
+                if claims:
+                    detections = _merge_person_claims(detections, claims)
 
                 tracker.process_batch(detections, camera_online=camera_online)
+                t_track1 = time.time()
 
-                # -- Phase A: spatial tracking + motion + line crossings ----
+                # -- Phase A: motion + line crossings (advisory) ------------
                 # Strictly additive/advisory; isolated so a Phase A failure can
                 # never degrade the employee pipeline.  Motion events are stored
                 # independently; crossings feed the security engine (B6/A10).
                 try:
-                    spatial.process(detections)
-                    tracks = spatial.active_tracks()
+                    t_db0 = time.time()
                     _, motion_events = motion.process(frames)
                     for mev in motion_events:
                         try:
@@ -1194,7 +1427,7 @@ def run(args: argparse.Namespace | None = None):
                 if is_local and not _resolution_reported:
                     h, w = next(iter(frames.values())).shape[:2]
                     print(f"Camera feed online: {w}x{h}  "
-                          f"(~{TARGET_FPS_PER_CAMERA} fps processed)")
+                          f"(~{_target_fps_eff} fps processed)")
                     _resolution_reported = True
 
                 # Reconcile discovered employees into the metadata store.
@@ -1208,6 +1441,7 @@ def run(args: argparse.Namespace | None = None):
                         )
                     except Exception:
                         logger.debug("Employee reconcile skipped (DB busy?)", exc_info=True)
+                t_db1 = time.time()
 
                 # Cache per-camera face overlays for the montage
                 for cam_id in frames:
@@ -1218,6 +1452,8 @@ def run(args: argparse.Namespace | None = None):
                 # blank/frozen camera can never accrue AWAY time.
                 last_processed = time.time()
 
+            t_detect = time.time()
+
             # -- Phase 31: Security engine tick --
             # Camera health must be evaluated even when no feed supplies a
             # usable frame; otherwise an all-camera outage can never reach the
@@ -1225,6 +1461,7 @@ def run(args: argparse.Namespace | None = None):
             # detector failure while there is no frame to inspect: that would
             # change the established all-camera-outage event semantics.
             try:
+                t_events0 = time.time()
                 security.tick(
                     detections=detections,
                     camera_health=health,
@@ -1232,6 +1469,7 @@ def run(args: argparse.Namespace | None = None):
                     detector_unavailable=bool(frames) and (
                         detector is None or getattr(detector, "model", None) is None),
                 )
+                t_events1 = time.time()
             except Exception as err:
                 logger.exception("Security tick failed (isolated): %s", err)
 
@@ -1249,6 +1487,7 @@ def run(args: argparse.Namespace | None = None):
                     telemetry[emp_id][cur] = telemetry[emp_id].get(cur, 0.0) + dt
                 last_state[emp_id] = cur
             last_processed = now
+            t_state = time.time()
 
             fps_frames += 1
             if now - fps_start >= 1.0:
@@ -1257,6 +1496,18 @@ def run(args: argparse.Namespace | None = None):
                 fps_start = now
 
             _maybe_log_pilot_metrics(health, fps, detector)
+
+            t_live0 = time.time()
+            phone_diag = (detector.diagnostics_snapshot()
+                          if detector is not None
+                          and hasattr(detector, "diagnostics_snapshot")
+                          else {"enabled": False})
+            reid_payload = None
+            if detector is not None and hasattr(detector, "phase44_diagnostics"):
+                try:
+                    reid_payload = detector.phase44_diagnostics().get("reid")
+                except Exception:
+                    reid_payload = None
 
             _write_live_state(
                 tracker.live_states(), telemetry,
@@ -1273,7 +1524,60 @@ def run(args: argparse.Namespace | None = None):
                 camera_selection=camera_selection,
                 ai_capabilities=(_registry_capabilities(registry)
                                  if registry is not None else None),
+                phone_diag=phone_diag,
+                timing=timing_ema,
+                reid=reid_payload,
             )
+            t_live = time.time()
+
+            # Part F: update the per-stage EMA (published next cycle).
+            if config.PIPELINE_TIMING:
+                _loop_total = time.time()
+                timing_n += 1
+                _k = 1.0 / timing_n
+                _stage = (detector.stage_timing()
+                          if detector is not None
+                          and hasattr(detector, "stage_timing")
+                          else {})
+                _max_age_ms = 0.0
+                for _hc in health.values():
+                    _last = _hc.get("last_frame")
+                    if _last:
+                        _max_age_ms = max(_max_age_ms,
+                                          (time.time() - _last) * 1000.0)
+                _detect = t_detect - t_capture
+                _cap = t_capture - t_total
+                _state = t_state - t_detect
+                _live = t_live - t_live0
+                _sub = (_cap + _state + _live
+                        + (_stage.get("person_yolo_ms", 0.0)
+                           + _stage.get("phone_ms", 0.0)
+                           + _stage.get("face_ms", 0.0)
+                           + _stage.get("reid_ms", 0.0)
+                           + (t_track1 - t_track0)
+                           + (t_db1 - t_db0)
+                           + (t_events1 - t_events0)) * 0.001)
+                for _key, _v in {
+                    "capture_ms": _cap * 1000.0,
+                    "person_yolo_ms": _stage.get("person_yolo_ms", 0.0),
+                    "phone_ms": _stage.get("phone_ms", 0.0),
+                    "face_ms": _stage.get("face_ms", 0.0),
+                    "reid_ms": _stage.get("reid_ms", 0.0),
+                    "tracking_ms": (t_track1 - t_track0) * 1000.0,
+                    "db_ms": (t_db1 - t_db0) * 1000.0,
+                    "events_ms": (t_events1 - t_events0) * 1000.0,
+                    "detect_ms": _detect * 1000.0,
+                    "state_ms": _state * 1000.0,
+                    "live_state_ms": _live * 1000.0,
+                    "other_ms": max(0.0, (_loop_total - t_total) - _sub)
+                                * 1000.0,
+                    "frame_age_ms": _max_age_ms,
+                    "total_ms": (_loop_total - t_total) * 1000.0,
+                }.items():
+                    if _key in timing_ema:
+                        timing_ema[_key] += (_v - timing_ema[_key]) * _k
+                    else:
+                        timing_ema[_key] = _v
 
             _maybe_run_retention(conn)   # once per day; no-op most seconds
 

@@ -35,6 +35,12 @@ MIN_SAMPLES_FOR_BASELINE = 5
 ZSCORE_THRESHOLD = 3.0          # std-deviations above mean -> anomalous
 PATTERN_MIN_OCCURRENCES = 4     # same zone+event repeats -> repeated pattern
 PATTERN_WINDOW_DAYS = 3
+# Phase 54 M05 -- cooldown for identical pattern re-fires.  Once a pattern (zone,
+# event_type) is stored with count N, an identical count is NOT re-stored unless
+# the previous store is older than this window (a daily reminder at most).  Only
+# a count increase re-fires immediately.  This is what stops the historical
+# "same count re-emitted five times in one minute" noise.
+PATTERN_COOLDOWN_SEC = 86400
 
 # Module-level event types we consider "behavioural" for baselines (person count
 # related).  Lifecycle/tamper events are excluded (they are not behaviour).
@@ -252,6 +258,12 @@ class AnomalyEngine:
                 f"{et} recurred {len(events)}x on zone={zone} cameras={cameras} "
                 f"within {window_days}d (pattern, advisory)"
             )
+            if not self._pattern_should_fire(zone, len(events)):
+                logger.debug(
+                    "anomaly dedup: REPEATED_PATTERN_DETECTED zone=%s count=%d "
+                    "is an unchanged repeat inside the cooldown window; "
+                    "suppressed (not stored).", zone, len(events))
+                continue
             self._store("REPEATED_PATTERN_DETECTED", "zone", zone, "LOW",
                         reason, data={"event_type": et, "count": len(events),
                                       "cameras": cameras})
@@ -262,6 +274,39 @@ class AnomalyEngine:
             db.audit(self._conn, "anomaly.patterns", actor=actor,
                      resource="campus", detail=f"{len(found)} patterns detected")
         return found
+
+    def _pattern_should_fire(self, zone: str, count: int) -> bool:
+        """Phase 54 M05 -- dedup gate for a recurring-pattern anomaly.
+
+        True when there is no prior stored pattern for ``zone``, when the count
+        has *grown* (a genuinely new observation), or when the previous store is
+        older than :data:`PATTERN_COOLDOWN_SEC` (a periodic reminder).  False
+        for an unchanged-count repeat inside the cooldown window.
+        """
+        from datetime import datetime
+        prev = db.latest_anomaly_for(
+            self._conn, anomaly_type="REPEATED_PATTERN_DETECTED",
+            scope="zone", scope_value=zone)
+        if prev is None:
+            return True
+        try:
+            prev_data = json.loads(prev.get("data") or "{}")
+        except (ValueError, TypeError):
+            prev_data = {}
+        try:
+            prev_count = int(prev_data.get("count"))
+        except (TypeError, ValueError):
+            prev_count = -1
+        if prev_count >= 0 and count > prev_count:
+            return True
+        if prev_count >= 0 and count <= prev_count:
+            try:
+                last_at = datetime.strptime(
+                    str(prev.get("observed_at"))[:19], "%Y-%m-%d %H:%M:%S")
+                return (datetime.now() - last_at).total_seconds() >= PATTERN_COOLDOWN_SEC
+            except (ValueError, TypeError):
+                return True
+        return True
 
     def _all_events_since(self, since_day: str):
         rows = self._conn.execute(
