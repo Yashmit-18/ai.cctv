@@ -1711,8 +1711,6 @@ def run(args: argparse.Namespace | None = None):
                     break
                 elif key == ord("r"):
                     generate_and_maybe_email(conn, "on-demand", email_on_complete=not args.no_email)
-            else:
-                cv2.waitKey(1)
 
             if interval > 0:
                 time.sleep(interval)

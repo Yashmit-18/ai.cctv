@@ -1,5 +1,5 @@
 # Runtime
-opencv-python>=4.9
+opencv-python-headless>=4.9
 ultralytics>=8.0
 torch>=2.0
 pandas>=2.0
@@ -8,7 +8,7 @@ python-dotenv>=1.0
 
 # Face Recognition / Dynamic Identification (Phase 6)
 insightface>=0.7.3
-onnxruntime-gpu>=1.15   # GPU runtime for insightface; use plain onnxruntime on CPU
+onnxruntime>=1.15
 scikit-learn>=1.0       # cosine-similarity helpers (sklearn.metrics)
 numpy>=1.24
 
