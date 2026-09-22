@@ -24,6 +24,7 @@ from src.domain import (
     PERM_CONFIGURE_ZONES,
     PERM_CONFIGURE_ALERTS,
     PERM_MANAGE_USERS,
+    PERM_CONFIGURE_SETTINGS,
 )
 from src.incidents import IncidentEngine
 
@@ -128,6 +129,9 @@ class AccessGuard:
 
     def require_manage_users(self) -> None:
         self.require(PERM_MANAGE_USERS)
+
+    def require_configure_settings(self) -> None:
+        self.require(PERM_CONFIGURE_SETTINGS)
 
     # -- read gate ------------------------------------------------------
     def require_view(self) -> None:

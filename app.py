@@ -48,11 +48,14 @@ from config import (
     WORK_SCHEDULE,
 )
 from src.analytics import employee_day_metrics, employee_range_metrics
+from src.domain import CAM_DARK_BLANK_FRAME
 from src.employees import EmployeeStore
 from src.incidents import IncidentEngine
 from src.notifier import last_email_status
 from src.security_events import EventStore, SecurityEvent
 from src.security_events import severity_to_index
+from src.seat_chairs import ChairStore
+from src.seat_zones import SeatZoneStore
 from src.zones import ZoneStore
 
 # ----------------------------------------------------------------------
@@ -423,6 +426,8 @@ _NAV = [
     ("Security", "security", ":material/shield:"),
     ("Reports", "reports", ":material/description:"),
     ("Analytics", "analytics", ":material/query_stats:"),
+    ("Cameras", "cameras", ":material/photo_camera:"),
+    ("Admin Control Center", "admin", ":material/settings_suggest:"),
     ("Settings", "settings", ":material/settings:"),
     ("Deploy / System Check", "deploy", ":material/rocket_launch:"),
 ]
@@ -788,12 +793,15 @@ def _render_camera_cards(live: dict) -> None:
         usable_s = "—" if usable is None else ("Usable frames" if usable else "Not usable")
         note = ""
         if str(code).upper() in ("OFFLINE", "NO_FRAME", "RECONNECTING") or \
-                h.get("unusable_reason") == "DARK_BLANK_FRAME":
+                h.get("unusable_reason") == CAM_DARK_BLANK_FRAME:
             reason = h.get("unusable_reason", "") or ""
             note = ("Camera not delivering usable frames — this is <b>not</b> employee "
                     "absence and never counts as AWAY." if not reason else
                     f"Feed not usable ({reason}) — preserved states are frozen; "
                     "this is never counted as AWAY.")
+        kind = h.get("kind") or "rtsp"
+        res = h.get("resolution") or "—"
+        rconn = int(h.get("reconnects", 0) or 0)
         cards.append(
             f"<div class='p42-card'><div class='p42-cam-head'>"
             f"<div><div class='p42-cam-name'>{html.escape(cid)}</div>"
@@ -802,6 +810,9 @@ def _render_camera_cards(live: dict) -> None:
             f"<div><b>Last frame</b><span>{last_s}</span></div>"
             f"<div><b>FPS</b><span>{fps}</span></div>"
             f"<div><b>Source</b><span>{html.escape(source)}</span></div>"
+            f"<div><b>Type</b><span>{html.escape(kind)}</span></div>"
+            f"<div><b>Resolution</b><span>{html.escape(res)}</span></div>"
+            f"<div><b>Reconnects</b><span>{rconn}</span></div>"
             f"<div><b>Frames</b><span>{h.get('frames_read', 0)}</span></div>"
             f"</div>{f'<div class=\'p42-cam-note\'>{note}</div>' if note else ''}</div>"
         )
@@ -1032,7 +1043,7 @@ def tab_live_employees():
     _hard_offline = ("OFFLINE", "NO_FRAME", "RECONNECTING")
     dead = [c for c, h in cam_health.items()
             if h.get("health") in _hard_offline
-            or h.get("unusable_reason") == "DARK_BLANK_FRAME"]
+            or h.get("unusable_reason") == CAM_DARK_BLANK_FRAME]
     frozen = [c for c, h in cam_health.items()
               if h.get("health") == "FROZEN_FRAME" and h.get("usable")]
     low_fps = [c for c, h in cam_health.items()
@@ -1368,6 +1379,44 @@ def tab_ai_capabilities():
                    "invented: AVAILABLE / DISABLED / DEGRADED / "
                    "NOT_CONFIGURED / FUTURE_MODEL_REQUIRED.")
 
+    ppass = (ai.get("phone_pass", {}) or {})
+    if ppass:
+        st.subheader("Phone Detection Pass (Phase 44/63)")
+        pp_rows = [{
+            "Source": ppass.get("source"),
+            "Class": ppass.get("phone_class"),
+            "Imgsz": ppass.get("imgsz"),
+            "Cadence": ppass.get("cadence"),
+            "Calls": ppass.get("calls"),
+            "Phones seen": ppass.get("boxes_seen"),
+            "Conf mean": ppass.get("conf_mean"),
+            "Conf min": ppass.get("conf_min"),
+        }]
+        st.dataframe(pd.DataFrame(pp_rows), width="stretch", hide_index=True)
+        st.caption("Live metrics of the dedicated phone pass. Model/source is "
+                   "the admin or env selection; cadence is the per-camera "
+                   "cycle gating. Empty = pass never ran yet.")
+
+    phdiag = (ai.get("phone_diag", {}) or {})
+    if phdiag.get("enabled"):
+        st.subheader("Phone/Person Association (CCTV_PHONE_DIAG=1)")
+        cam_rows = [{
+            "Camera": c,
+            "Cycles": d.get("cycles"),
+            "Persons": d.get("person_dets"),
+            "Phones": d.get("phone_dets"),
+            "Conf mean": d.get("phone_conf_mean"),
+            "Matched": d.get("matched_to_person"),
+            "Unmatched": d.get("unmatched_to_person"),
+        } for c, d in (phdiag.get("cameras") or {}).items()]
+        if cam_rows:
+            st.dataframe(pd.DataFrame(cam_rows), width="stretch",
+                         hide_index=True)
+            st.caption("Diagnostic measurement only — never changes detection "
+                       "behaviour.")
+        else:
+            st.caption("Diagnostics enabled; no camera samples yet.")
+
     tracks = (ai.get("spatial_tracks", {}) or {})
     tr_rows = []
     for t in tracks.get("tracks", []):
@@ -1387,6 +1436,29 @@ def tab_ai_capabilities():
         st.subheader("Spatial Person Tracks")
         st.info("No live spatial tracks right now (A5/A6 tracker is idle).")
 
+    seat_zone = (ai.get("seat_zones", {}) or {})
+    if seat_zone:
+        st.subheader(f"Desk / Seat Zones ({seat_zone.get('zone_count', 0)})")
+        st.caption(
+            "Which desk a person currently occupies (Phase 59). Seat is "
+            "**context only** — it never overrides face identity: an unknown "
+            "face stays Unknown, and an EMP002 sitting in EMP001's seat is "
+            "reported as EMP002 with a neutral mismatch observation.")
+        sz_rows = [{
+            "Zone": z.get("name") or z.get("zone_id"),
+            "Camera": z.get("camera_id"),
+            "Status": z.get("status"),
+            "Assigned": z.get("assigned_employee_id") or "—",
+            "Current": z.get("current_identity") or "—",
+            "Identity": z.get("identity_state") or "—",
+            "Persons": z.get("persons"),
+        } for z in seat_zone.get("zones", [])]
+        if sz_rows:
+            st.dataframe(pd.DataFrame(sz_rows), width="stretch", hide_index=True)
+        else:
+            st.info("No desk/seat zones configured yet (data/seat_zones.json "
+                    "or the admin editor below).")
+
     mstate = (ai.get("motion", {}) or {})
     if mstate:
         st.subheader("Motion Status (A8)")
@@ -1400,6 +1472,45 @@ def tab_ai_capabilities():
         st.dataframe(pd.DataFrame(m_rows), width="stretch", hide_index=True)
         st.caption("Motion is advisory only: it records into the motion_events "
                    "table and is never treated as a security alarm on its own.")
+
+    role = st.session_state.get("cctv_role", "viewer")
+    if role == "admin":
+        st.subheader("Desk / Seat Zone Editor (Phase 59)")
+        st.caption("Add or update a desk/seat zone. The polygon uses normalised "
+                   "coordinates 0..1 for the referenced camera's frame. "
+                   "Assigning an employee is a *seat-map hint* — it never "
+                   "overrides face identity.")
+        with st.form("seatzone_form"):
+            sz_id = st.text_input("Zone ID (e.g. A01)")
+            sz_cam = st.text_input("Camera")
+            sz_name = st.text_input("Name (optional)")
+            sz_poly = st.text_input(
+                "Polygon JSON (e.g. [[0.2,0.1],[0.8,0.1],[0.8,0.9],[0.2,0.9]])")
+            sz_assigned = st.text_input("Assigned employee (optional, e.g. EMP001)")
+            sz_enabled = st.checkbox("Enabled", value=True)
+            sz_submit = st.form_submit_button("Save Zone")
+        if sz_submit:
+            if not (sz_id.strip() and sz_cam.strip() and sz_poly.strip()):
+                st.error("Zone ID, camera, and polygon are required.")
+            else:
+                try:
+                    conn = _open_write_conn()
+                    try:
+                        store = SeatZoneStore(conn)
+                        store.add(
+                            zone_id=sz_id.strip(),
+                            camera_id=sz_cam.strip(),
+                            name=sz_name.strip(),
+                            polygon=sz_poly.strip(),
+                            enabled=sz_enabled,
+                            assigned_employee_id=sz_assigned.strip() or None,
+                        )
+                    finally:
+                        conn.close()
+                    st.success(f"Desk zone {sz_id} saved. Restart the daemon "
+                               "(or wait for its next config refresh) to apply.")
+                except ValueError as _e:
+                    st.error(str(_e))
 
 
 def tab_reports(role: str = "viewer"):
@@ -2014,6 +2125,281 @@ def tab_security(role):
             st.warning(f"Phase 34 SOC view unavailable: {exc}")
 
 
+def tab_admin_cameras(role: str) -> None:
+    """Phase 61 -- Admin → Cameras: persistent camera management.
+
+    Add / edit / enable-disable / test-connect / apply the runtime camera
+    configuration.  All writes go to ``admin_cameras`` (SQLite); the daemon
+    reconciles within seconds, so no code edit or restart is required.  Never
+    displays a saved password or a credential-bearing URL.
+    """
+    st.header("Admin → Cameras")
+    st.caption(
+        "Configure IP CCTV / RTSP / local cameras. Changes are saved to the "
+        "database and the runtime daemon applies them automatically (Apply "
+        "button below forces an immediate apply request)."
+    )
+    if role != "admin":
+        st.info("Viewer role: read-only. Ask an admin to configure cameras.")
+        return
+
+    from src.camera_store import CameraStore, test_camera_connection
+    from src import database as db
+    from src.domain import CameraSourceKind
+
+    conn = _open_write_conn()
+    try:
+        db.init_db(conn)  # idempotent; guarantees the admin tables exist
+    except Exception:  # pragma: no cover - surface gracefully
+        st.error("Could not open the application database for camera settings.")
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return
+    try:
+        store = CameraStore(conn)
+        records = store.list()
+        live = (load_live_state() or {}).get("camera_health", {}) or {}
+        _kind_labels = {k.value: k.value for k in CameraSourceKind}
+        _kind_choices = list(_kind_labels)
+
+        st.subheader(":material/photo_camera: Camera list")
+        if not records:
+            st.info("No admin-configured cameras yet. Use the form below to add "
+                    "one (or keep using `.env` cameras unchanged).")
+        else:
+            rows = []
+            for r in records:
+                s = r.safe_dict()
+                h = live.get(r.camera_id, {})
+                rows.append({
+                    "Camera ID": r.camera_id,
+                    "Name": r.name,
+                    "Type": s["kind"],
+                    "Location": r.location or "-",
+                    "Enabled": "yes" if r.enabled else "no",
+                    "Status": h.get("health") if h else "N/A (no live daemon)",
+                    "Resolution": h.get("resolution") or "-",
+                    "FPS": h.get("fps") if h else "-",
+                    "Credentials": s["credentials"],
+                })
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            st.caption("Connection status comes from the running daemon's "
+                       "health snapshot (OFFLINE / ONLINE / NO_FRAME / ...). "
+                       "Credentials are never displayed.")
+            st.caption("Stored URLs are shown redacted; e.g. "
+                       "`rtsp://***:***@host/...`.")
+
+        # -- Enable / disable ------------
+        st.markdown("**Enable / Disable**")
+        with st.expander("Toggle cameras", expanded=False):
+            for r in records:
+                c1, c2 = st.columns([3, 1])
+                c1.write(f"{r.camera_id} · {r.name}")
+                new_val = c2.toggle(
+                    "Enabled", value=bool(r.enabled),
+                    key=f"cam61_enable_{r.camera_id}")
+                if new_val != bool(r.enabled):
+                    store.set_enabled(r.camera_id, new_val)
+                    st.caption(f"{r.camera_id} {'enabled' if new_val else 'disabled'} "
+                               "— saved and queued for runtime apply.")
+                    st.rerun()
+
+        # -- Apply handshake status ------
+        st.markdown("**Runtime apply status**")
+        st_c = store.apply_state()
+        if not st_c:
+            st.caption("No apply handshake yet. The daemon records one once it "
+                       "runs a reconcile.")
+        else:
+            st.caption(
+                f"Requested: {st_c.get('requested_revision', '')[:12]} "
+                f"at {st_c.get('requested_at') or '-'} · "
+                f"Applied: {st_c.get('applied_revision', '')[:12]} "
+                f"at {st_c.get('applied_at') or '-'}."
+            )
+            if (st_c.get("requested_revision") != st_c.get("applied_revision")):
+                st.info("A configuration apply is pending — the daemon will "
+                        "apply it within a few seconds.")
+
+        st.divider()
+
+        # -- Add camera --------------------
+        st.subheader(":material/add_call: Add camera")
+        with st.form("cam61_add", clear_on_submit=False):
+            c_id = st.text_input("Camera ID",
+                                 help="Stable identifier, e.g. CAM01 / cam_01")
+            c_name = st.text_input("Camera name")
+            c_kind = st.selectbox("Camera type", _kind_choices, index=1)
+            c_url = st.text_input("URL / source",
+                                  help="For RTSP paste `rtsp://host[:port]/path`. "
+                                       "Credentials can stay out of the URL — use "
+                                       "the separate username/password fields.")
+            c_user = st.text_input("Username (optional)")
+            c_pass = st.text_input("Password (optional)", type="password")
+            c_loc = st.text_input("Location (optional)")
+            c_en = st.checkbox("Enabled", value=True)
+            c_fps = st.number_input("Target FPS (0 = system default)",
+                                    min_value=0, max_value=240, value=0)
+            with st.expander("Reconnect behaviour"):
+                c_rb = st.number_input("Reconnect base (s)", min_value=0.0,
+                                       value=2.0, step=0.5)
+                c_rm = st.number_input("Reconnect max (s)", min_value=0.1,
+                                       value=30.0, step=1.0)
+                c_rf = st.number_input("Reconnect factor (>=1.0)", min_value=1.0,
+                                       value=2.5, step=0.1)
+            col_a, col_b = st.columns(2)
+            t_res = col_a.form_submit_button("Test Connection")
+            save_res = col_b.form_submit_button("Add Camera")
+
+            if t_res:
+                probe = test_camera_connection(
+                    c_url, kind=c_kind, username=c_user, password=c_pass,
+                    reconnect=(c_rb, c_rm, c_rf), timeout=6.0)
+                if probe["ok"]:
+                    st.success(
+                        f"Connection OK — {probe.get('health')} "
+                        f"{probe.get('resolution') or ''} "
+                        f"@ {probe.get('fps')} fps.")
+                else:
+                    st.error(
+                        f"Connection unavailable — {probe.get('error')} "
+                        f"(probe took {probe.get('elapsed')}s).")
+            if save_res:
+                try:
+                    store.add(
+                        camera_id=c_id, name=c_name, kind=c_kind, url=c_url,
+                        username=c_user, password=c_pass, enabled=c_en,
+                        location=c_loc, fps_target=c_fps,
+                        reconnect_base=c_rb, reconnect_max=c_rm,
+                        reconnect_factor=c_rf,
+                    )
+                    st.success(f"Camera {c_id} saved.")
+                    store.request_apply()
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(f"Could not save camera: {exc}")
+
+        st.divider()
+
+        # -- Edit camera --------------------
+        st.subheader(":material/edit: Edit camera")
+        if not records:
+            st.caption("Nothing to edit yet.")
+        else:
+            edit_id = st.selectbox(
+                "Select camera to edit", [r.camera_id for r in records],
+                key="cam61_edit_sel")
+            src = store.get(edit_id)
+            if src is not None:
+                st.caption(
+                    f"Editing {src.camera_id} ({src.name}). The identity "
+                    "`camera_id` never changes on edit. Saved password stays "
+                    "hidden (change it via the replacement field only).")
+                with st.form("cam61_edit"):
+                    e_name = st.text_input("Camera name",
+                                           value=src.name, key="c61e_name")
+                    e_kind = st.selectbox("Camera type", _kind_choices,
+                                          index=_kind_choices.index(src.kind),
+                                          key="c61e_kind")
+                    e_url = st.text_input("URL / source", value=src.url,
+                                          key="c61e_url")
+                    e_user = st.text_input("Username (optional)",
+                                           value=src.username, key="c61e_user")
+                    st.caption("Password: saved (********). Leave the "
+                               "replacement empty to keep the saved one.")
+                    e_pass = st.text_input("Replace password (optional)",
+                                           type="password", key="c61e_pass")
+                    e_loc = st.text_input("Location (optional)",
+                                          value=src.location, key="c61e_loc")
+                    e_en = st.checkbox("Enabled", value=bool(src.enabled),
+                                       key="c61e_en")
+                    e_fps = st.number_input("Target FPS (0 = system default)",
+                                            min_value=0, max_value=240,
+                                            value=int(src.fps_target or 0),
+                                            key="c61e_fps")
+                    with st.expander("Reconnect behaviour"):
+                        e_rb = st.number_input("Reconnect base (s)",
+                                               min_value=0.0,
+                                               value=float(src.reconnect_base or 0.0),
+                                               step=0.5, key="c61e_rb")
+                        e_rm = st.number_input("Reconnect max (s)",
+                                               min_value=0.1,
+                                               value=float(src.reconnect_max),
+                                               step=1.0, key="c61e_rm")
+                        e_rf = st.number_input("Reconnect factor (>=1.0)",
+                                               min_value=1.0,
+                                               value=float(src.reconnect_factor),
+                                               step=0.1, key="c61e_rf")
+                    col_a, col_b = st.columns(2)
+                    e_test = col_a.form_submit_button("Test Connection")
+                    e_save = col_b.form_submit_button("Save Changes")
+                    if e_test:
+                        probe = test_camera_connection(
+                            e_url, kind=e_kind, username=e_user,
+                            password=(e_pass or src.password),
+                            reconnect=(e_rb, e_rm, e_rf), timeout=6.0)
+                        if probe["ok"]:
+                            st.success(
+                                f"Connection OK — {probe.get('health')} "
+                                f"{probe.get('resolution') or ''} "
+                                f"@ {probe.get('fps')} fps.")
+                        else:
+                            st.error(
+                                f"Connection unavailable — {probe.get('error')} "
+                                f"(probe took {probe.get('elapsed')}s).")
+                    if e_save:
+                        updates = {
+                            "name": e_name, "kind": e_kind, "url": e_url,
+                            "username": e_user, "location": e_loc,
+                            "enabled": bool(e_en), "fps_target": e_fps,
+                            "reconnect_base": e_rb, "reconnect_max": e_rm,
+                            "reconnect_factor": e_rf,
+                        }
+                        if e_pass:
+                            updates["password"] = e_pass
+                        try:
+                            store.update(src.camera_id, updates)
+                            st.success(f"Camera {src.camera_id} saved.")
+                            store.request_apply()
+                            st.rerun()
+                        except ValueError as exc:
+                            st.error(f"Could not save camera: {exc}")
+
+        st.divider()
+
+        # -- Delete (safe) + Apply ---------
+        st.subheader(":material/delete: Remove / Apply")
+        if records:
+            with st.expander("Remove a camera (safe)", expanded=False):
+                del_id = st.selectbox(
+                    "Camera to remove", [r.camera_id for r in records],
+                    key="cam61_del_sel")
+                warn = st.warning(
+                    "Removing deletes the admin record only when no historical "
+                    "event/incident/health/zone data still references this "
+                    "camera_id. If such history exists, disable the camera "
+                    "instead.")
+                if st.button("Remove camera", key="cam61_del_btn"):
+                    try:
+                        if store.delete(del_id):
+                            st.success(f"Camera {del_id} removed.")
+                            store.request_apply()
+                            st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+        if st.button(":material/sync: Apply Camera Configuration", key="cam61_apply"):
+            store.request_apply()
+            st.success("Apply requested — the daemon will reconcile the runtime "
+                       "pool within a few seconds.")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def tab_settings():
     import config
     st.header("Settings (read-only)")
@@ -2198,6 +2584,867 @@ def tab_deployment(role: str):
 # Main
 # ======================================================================
 
+# ======================================================================
+# Phase 62 -- Admin Control Center
+# ======================================================================
+# One dashboard page that gives an administrator the single, persistent source
+# of truth for office intelligence configuration: employees (display name /
+# enable / desk+chair assignment), desks (== seat zones), chairs, the office &
+# lunch schedule and the away/phone/talking threshold knobs.  Everything is
+# persisted in the existing application SQLite DB (``settings`` table), so the
+# daemon and the dashboard always agree.  All mutations are RBAC-gated and
+# audited; nothing secret (passwords / embeddings) is ever logged.
+#
+# Architecture contract: this page REUSES the existing stores (EmployeeStore,
+# SeatZoneStore, ChairStore, CameraStore, SettingsStore).  It does not create
+# duplicate registries/stores/trackers.  Desk == seat zone in this model: the
+# seat_zones table holds the desk polygons; there is no second "desks" table.
+
+_ADMIN_SUB = [
+    ("Overview", "overview"),
+    ("Cameras", "cameras"),
+    ("Employees", "employees"),
+    ("Desks & Zones", "zones"),
+    ("Chairs", "chairs"),
+    ("Schedule", "schedule"),
+    ("Thresholds", "thresholds"),
+    ("System", "system"),
+]
+_ADMIN_SUB_LABELS = [label for label, _k in _ADMIN_SUB]
+_ADMIN_SUB_KEYS = {label: key for label, key in _ADMIN_SUB}
+
+
+def _admin_people_label(emp_id: str, name: str, display_name: str) -> str:
+    shown = display_name or name
+    return f"{emp_id} — {shown}" if shown else emp_id
+
+
+def _admin_safe_id(raw: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_\-]+", str(raw or "").strip()))
+
+
+def _admin_polygon_text(text: str) -> tuple[str | None, str]:
+    """Validate polygon input (JSON list of [x, y] 0..1 points)."""
+    from src.zones import parse_polygon
+    poly = parse_polygon(text)
+    if not poly:
+        return None, "Polygon must be a JSON list of >= 3 [x, y] points in 0..1"
+    return json.dumps(poly), ""
+
+
+def tab_admin(role: str) -> None:
+    """Phase 62 -- Admin Control Center (top-level navigation page)."""
+    st.header("Admin Control Center")
+    st.caption(
+        "Single persistent place to manage employees, desks (zones), chairs, "
+        "the office/lunch schedule and detection thresholds. All admin writes "
+        "are permission-checked and audited."
+    )
+    choice = st.radio("p62_admin_sub", _ADMIN_SUB_LABELS,
+                      key="p62_admin_sub", horizontal=True,
+                      label_visibility="collapsed")
+    page = _ADMIN_SUB_KEYS[choice]
+    if page == "overview":
+        tab_admin_overview(role)
+    elif page == "cameras":
+        tab_admin_cameras(role)
+    elif page == "employees":
+        tab_admin_employees(role)
+    elif page == "zones":
+        tab_admin_zones(role)
+    elif page == "chairs":
+        tab_admin_chairs(role)
+    elif page == "schedule":
+        tab_admin_schedule(role)
+    elif page == "thresholds":
+        tab_admin_thresholds(role)
+    else:
+        tab_admin_system(role)
+
+
+def tab_admin_overview(role: str) -> None:
+    """Read-only dashboard of the current admin-managed configuration state."""
+    st.subheader("Configuration Overview")
+    conn = get_readonly_connection()
+    if conn is None:
+        st.error("Database unavailable.")
+        return
+    try:
+        from src.admin_store import SettingsStore
+        emps = EmployeeStore(conn, WORK_SCHEDULE).list()
+        zones = SeatZoneStore(conn).list()
+        chairs = ChairStore(conn).list()
+        cams = []
+        try:
+            from src.camera_store import CameraStore
+            cams = CameraStore(conn).list()
+        except Exception:  # pragma: no cover - cameras optional
+            cams = []
+        settings = SettingsStore(conn).get()
+    except Exception as exc:  # pragma: no cover - surface gracefully
+        st.error(f"Could not read configuration overview: {exc}")
+        return
+    finally:
+        conn.close()
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Employees", f"{len(emps)}",
+              help=f"{sum(1 for e in emps if e.active)} active")
+    m2.metric("Desks (zones)", f"{len(zones)}",
+              help=f"{sum(1 for z in zones if z.enabled)} enabled")
+    m3.metric("Chairs", f"{len(chairs)}",
+              help=f"{sum(1 for c in chairs if c.enabled)} enabled")
+    m4.metric("Cameras (admin)", f"{len(cams)}",
+              help="configured via Admin → Cameras")
+
+    s1, s2, s3 = st.columns(3)
+    s1.info(f"Timezone **{settings.tz}**\n\nOffice **{settings.office_start} → "
+            f"{settings.office_end}** · Lunch **{settings.lunch_start} → "
+            f"{settings.lunch_end}**")
+    s2.info(f"Away **{settings.away_seconds:g}s** · Phone "
+            f"**{settings.phone_seconds:g}s** · Talking "
+            f"**{settings.talking_seconds:g}s**")
+    s3.info(f"Phone pass · class **{settings.phone_class}** · imgsz "
+            f"**{settings.phone_imgsz}** · cadence "
+            f"**{settings.phone_cadence}**\n\nModel: "
+            f"{settings.phone_model_path or 'base YOLO'} · evidence "
+            f"**{settings.phone_evidence_min}/{settings.phone_evidence_window}**")
+    st.caption("Identity note: desk/chair assignments are context only — an "
+               "unknown face is never relabelled, an empty desk is VACANT.")
+    st.caption(f"Session role: **{role}** (admin ops are RBAC-gated).")
+
+
+def tab_admin_employees(role: str) -> None:
+    """Admin → Employees: define / rename (display label), enable-disable and
+    assign employees to a desk (zone) and chair.  ``employee_id`` is the
+    canonical identity and is NEVER changed."""
+    st.subheader("Employees")
+    st.caption("Identity-safe: the stable `employee_id` is never rewritable; "
+               "only the presentation display label changes.")
+    conn = get_readonly_connection()
+    try:
+        emps = EmployeeStore(conn, WORK_SCHEDULE).list()
+        zones = SeatZoneStore(conn).list()
+        chairs = ChairStore(conn).list()
+    finally:
+        conn.close()
+
+    if not emps:
+        st.info("No employees yet. Create the first one below.")
+    else:
+        df = pd.DataFrame([{
+            "Employee ID": e.employee_id,
+            "Display label": e.display_name or e.name or "—",
+            "Department": e.department or "—",
+            "Active": "✓" if e.active else "—",
+            "Desk (zone)": next((z.zone_id for z in zones
+                                 if z.assigned_employee_id == e.employee_id),
+                                "—"),
+            "Chair": next((c.chair_id for c in chairs
+                           if c.assigned_employee_id == e.employee_id), "—"),
+        } for e in emps])
+        st.dataframe(df, width="stretch")
+
+    if role != "admin":
+        st.caption("Viewer role: read-only. Ask an admin to modify employees.")
+        return
+
+    from src.admin_store import validate_assignment
+
+    with st.form("p62_emp_create"):
+        st.markdown("**Add employee**")
+        eid = st.text_input("Employee ID (e.g. EMP012)")
+        c1, c2 = st.columns(2)
+        name = c1.text_input("Name")
+        dname = c2.text_input("Display label (optional, shown in UIs)")
+        c3, c4 = st.columns(2)
+        dept = c3.text_input("Department")
+        desig = c4.text_input("Designation")
+        active = st.checkbox("Active", value=True)
+        create = st.form_submit_button("Save employee")
+    if create:
+        safe_eid = _safe_employee_id(eid)
+        if not eid.strip():
+            st.error("Employee ID is required.")
+        elif not safe_eid:
+            st.error("Invalid Employee ID (letters, digits, _ and - only).")
+        elif safe_eid.lower() in ("unknown", "__person__"):
+            st.error("Reserved ID; choose a different one.")
+        elif any(e.employee_id == safe_eid for e in emps):
+            st.error(f"{safe_eid} already exists.")
+        else:
+            conn = _open_write_conn()
+            try:
+                from src import database as db
+                from src.rbac import AccessGuard, AccessDenied
+                AccessGuard(conn, actor=role, role=role).require_manage_users()
+                EmployeeStore(conn, WORK_SCHEDULE).upsert(
+                    safe_eid, name=name, department=dept,
+                    designation=desig, active=active)
+                EmployeeStore(conn, WORK_SCHEDULE).set_display_name(
+                    safe_eid, dname)
+                db.audit(conn, "employee.create", actor=role,
+                         resource=safe_eid, detail="p62 admin create")
+                conn.commit()
+                st.success(f"Saved {safe_eid}.")
+                st.rerun()
+            except AccessDenied:
+                st.error("Your role cannot modify employees.")
+            finally:
+                conn.close()
+        return
+
+    if emps:
+        st.divider()
+        with st.form("p62_emp_rename"):
+            st.markdown("**Rename display label** (identity/`employee_id` unchanged)")
+            chosen = st.selectbox(
+                "Employee",
+                [e.employee_id for e in emps],
+                format_func=lambda eid: _admin_people_label(
+                    eid, next(e.name for e in emps if e.employee_id == eid),
+                    next(e.display_name for e in emps if e.employee_id == eid)),
+            )
+            new_label = st.text_input("Display label (empty clears)")
+            rename = st.form_submit_button("Rename")
+        if rename:
+            conn = _open_write_conn()
+            try:
+                from src import database as db
+                from src.rbac import AccessGuard, AccessDenied
+                AccessGuard(conn, actor=role, role=role).require_manage_users()
+                EmployeeStore(conn, WORK_SCHEDULE).set_display_name(
+                    chosen, new_label)
+                db.audit(conn, "employee.rename", actor=role,
+                         resource=chosen,
+                         detail=f"display_name={'<cleared>' if not new_label.strip() else new_label.strip()}")
+                conn.commit()
+                st.success(f"Renamed {chosen}.")
+                st.rerun()
+            except AccessDenied:
+                st.error("Your role cannot rename employees.")
+            finally:
+                conn.close()
+
+        st.divider()
+        with st.form("p62_emp_active"):
+            st.markdown("**Enable / disable** (never deletes history)")
+            chosen = st.selectbox(
+                "Employee", [e.employee_id for e in emps],
+                key="p62_emp_active_sel")
+            emp = next((e for e in emps if e.employee_id == chosen), None)
+            new_active = st.checkbox("Active", value=bool(emp and emp.active))
+            toggle = st.form_submit_button("Update")
+        if toggle:
+            conn = _open_write_conn()
+            try:
+                from src import database as db
+                from src.rbac import AccessGuard, AccessDenied
+                AccessGuard(conn, actor=role, role=role).require_manage_users()
+                EmployeeStore(conn, WORK_SCHEDULE).set_active(chosen, new_active)
+                db.audit(conn, "employee.active", actor=role, resource=chosen,
+                         detail="enabled" if new_active else "disabled")
+                conn.commit()
+                st.success(f"{chosen} {'enabled' if new_active else 'disabled'}.")
+                st.rerun()
+            except AccessDenied:
+                st.error("Your role cannot modify employees.")
+            finally:
+                conn.close()
+
+        st.divider()
+        with st.form("p62_emp_assign"):
+            st.markdown("**Assign desk (zone) / chair** — validated against "
+                        "missing or disabled targets")
+            chosen = st.selectbox(
+                "Employee", [e.employee_id for e in emps],
+                key="p62_emp_assign_sel")
+            zchoice = st.selectbox("Desk (zone) — or blank to unassign",
+                                   [""] + [z.zone_id for z in zones])
+            cchoice = st.selectbox("Chair — or blank to unassign",
+                                   [""] + [ch.chair_id for ch in chairs])
+            assign = st.form_submit_button("Save assignment")
+        if assign:
+            z_id = zchoice or None
+            c_id = cchoice or None
+            conn = _open_write_conn()
+            try:
+                from src import database as db
+                from src.rbac import AccessGuard, AccessDenied
+                problems = validate_assignment(
+                    conn, employee_id=chosen, zone_id=z_id, chair_id=c_id)
+                if problems:
+                    st.error("; ".join(problems))
+                else:
+                    AccessGuard(conn, actor=role,
+                                role=role).require_manage_users()
+                    if z_id:
+                        SeatZoneStore(conn).set_assignment(z_id, chosen)
+                    for z in zones:
+                        if (z.assigned_employee_id == chosen
+                                and z.zone_id != (z_id or "")):
+                            SeatZoneStore(conn).set_assignment(z.zone_id, None)
+                    if c_id:
+                        ChairStore(conn).set_assignment(c_id, chosen)
+                    for c in chairs:
+                        if (c.assigned_employee_id == chosen
+                                and c.chair_id != (c_id or "")):
+                            ChairStore(conn).set_assignment(c.chair_id, None)
+                    if z_id:
+                        db.audit(conn, "employee.assign_desk", actor=role,
+                                 resource=chosen,
+                                 detail=f"zone={z_id} (context hint only)")
+                    if c_id:
+                        db.audit(conn, "employee.assign_chair", actor=role,
+                                 resource=chosen,
+                                 detail=f"chair={c_id} (context hint only)")
+                    conn.commit()
+                    st.success(f"Assignment saved for {chosen}.")
+                    st.rerun()
+            except AccessDenied:
+                st.error("Your role cannot assign desks/chairs.")
+            finally:
+                conn.close()
+
+
+def tab_admin_zones(role: str) -> None:
+    """Admin → Desks & Zones (== seat zones): the desk polygons."""
+    st.subheader("Desks & Zones")
+    st.caption("A desk is a seat zone: a polygon attached to one camera with "
+               "an optional assigned employee (context hint).")
+    conn = get_readonly_connection()
+    try:
+        zones = SeatZoneStore(conn).list()
+        cams = []
+        try:
+            from src.camera_store import CameraStore
+            cams = CameraStore(conn).list()
+        except Exception:  # pragma: no cover - cameras optional
+            cams = []
+    finally:
+        conn.close()
+
+    if zones:
+        st.dataframe(pd.DataFrame([{
+            "Desk/Zone": z.zone_id,
+            "Camera": z.camera_id,
+            "Name": z.name or "—",
+            "Enabled": "✓" if z.enabled else "—",
+            "Assigned to": z.assigned_employee_id or "—",
+            "Points": str(len(z.polygon)) if z.has_polygon() else "—",
+        } for z in zones]), width="stretch")
+
+    if role != "admin":
+        st.caption("Viewer role: read-only.")
+        return
+
+    cam_ids = [c.camera_id for c in cams]
+    from src.admin_store import validate_assignment
+
+    with st.form("p62_zone_create"):
+        st.markdown("**Add desk (zone)**")
+        zid = st.text_input("Desk ID (e.g. DESK-A1 / ZONE-A1)")
+        cam = st.selectbox("Camera", cam_ids or ["(add cameras first)"])
+        zname = st.text_input("Name (optional)")
+        poly = st.text_area(
+            "Polygon (JSON): e.g. [[0.4,0.2],[0.7,0.2],[0.7,0.6],[0.4,0.6]]",
+            height=70)
+        make = st.form_submit_button("Add desk")
+    if make:
+        if not _admin_safe_id(zid):
+            st.error("Desk ID must be letters/digits/_/- only.")
+            return
+        if not cam_ids:
+            st.error("Add a camera first (Admin → Cameras).")
+            return
+        poly_ok, err = _admin_polygon_text(poly)
+        if not poly_ok:
+            st.error(err)
+            return
+        conn = _open_write_conn()
+        try:
+            from src import database as db
+            from src.rbac import AccessGuard, AccessDenied
+            AccessGuard(conn, actor=role, role=role).require_configure_zones()
+            store = SeatZoneStore(conn)
+            if store.get(zid):
+                st.error(f"Desk {zid} already exists.")
+            else:
+                store.add(zone_id=zid, camera_id=cam, polygon=poly_ok,
+                          name=zname, enabled=True)
+                db.audit(conn, "desk.create", actor=role, resource=zid,
+                         detail="seat zone created")
+                conn.commit()
+                st.success(f"Desk {zid} added.")
+                st.rerun()
+        except AccessDenied:
+            st.error("Your role cannot modify desks/zones.")
+        finally:
+            conn.close()
+
+    if zones:
+        st.divider()
+        with st.form("p62_zone_edit"):
+            st.markdown("**Edit desk** — rename, move camera, re-draw polygon")
+            zsel = st.selectbox("Desk", [z.zone_id for z in zones])
+            z = next((z for z in zones if z.zone_id == zsel), None)
+            zcam = st.selectbox("Camera", cam_ids or [z.camera_id],
+                                index=(cam_ids.index(z.camera_id)
+                                       if cam_ids and z and z.camera_id in cam_ids
+                                       else 0))
+            zname = st.text_input("Name", value=(z.name if z else ""))
+            zpoly = st.text_area(
+                "Polygon (JSON)", height=70,
+                value=json.dumps(z.polygon) if z and z.polygon else "")
+            zen = st.checkbox("Enabled", value=bool(z and z.enabled))
+            edit = st.form_submit_button("Save desk")
+        if edit:
+            if not cam_ids:
+                st.error("Add a camera first (Admin → Cameras).")
+                return
+            poly_ok, err = _admin_polygon_text(zpoly)
+            if not poly_ok:
+                st.error(err)
+                return
+            conn = _open_write_conn()
+            try:
+                from src import database as db
+                from src.rbac import AccessGuard, AccessDenied
+                AccessGuard(conn, actor=role, role=role).require_configure_zones()
+                SeatZoneStore(conn).update(
+                    zsel, camera_id=zcam, name=zname,
+                    polygon=poly_ok, enabled=zen)
+                db.audit(conn, "desk.update", actor=role, resource=zsel,
+                         detail="seat zone edited")
+                conn.commit()
+                st.success(f"Desk {zsel} saved.")
+                st.rerun()
+            except AccessDenied:
+                st.error("Your role cannot modify desks/zones.")
+            finally:
+                conn.close()
+
+        st.divider()
+        with st.form("p62_zone_assign"):
+            st.markdown("**Assign employee to desk** (context hint only)")
+            zsel = st.selectbox("Desk", [z.zone_id for z in zones],
+                                key="p62_zone_assign_sel")
+            emps = _employees_readonly() or []
+            emp_choice = st.selectbox(
+                "Employee — or blank to unassign",
+                [""] + [e.employee_id for e in emps],
+                index=0,
+                key="p62_zone_assign_emp")
+            do_assign = st.form_submit_button("Save")
+        if do_assign:
+            conn = _open_write_conn()
+            try:
+                from src import database as db
+                from src.rbac import AccessGuard, AccessDenied
+                problems = validate_assignment(
+                    conn, zone_id=zsel, employee_id=emp_choice or None)
+                if problems:
+                    st.error("; ".join(problems))
+                else:
+                    AccessGuard(conn, actor=role,
+                                role=role).require_configure_zones()
+                    SeatZoneStore(conn).set_assignment(zsel, emp_choice or None)
+                    db.audit(conn, "desk.assignment", actor=role,
+                             resource=zsel,
+                             detail=f"employee={emp_choice or '<cleared>'}")
+                    conn.commit()
+                    st.success(f"Desk {zsel} assignment saved.")
+                    st.rerun()
+            except AccessDenied:
+                st.error("Your role cannot modify desks/zones.")
+            finally:
+                conn.close()
+
+        st.divider()
+        with st.form("p62_zone_delete"):
+            st.markdown("**Delete desk** — removes the desk config and its "
+                        "chairs; events/history are NOT touched")
+            zsel = st.selectbox("Desk", [z.zone_id for z in zones],
+                                key="p62_zone_del_sel")
+            z = next((z for z in zones if z.zone_id == zsel), None)
+            confirm = st.checkbox("Confirm: delete this desk config")
+            do_del = st.form_submit_button("Delete desk")
+        if do_del:
+            if not confirm:
+                st.error("Tick the confirmation box to delete.")
+            else:
+                conn = _open_write_conn()
+                try:
+                    from src import database as db
+                    from src.rbac import AccessGuard, AccessDenied
+                    AccessGuard(conn, actor=role,
+                                role=role).require_configure_zones()
+                    for c in ChairStore(conn).for_zone(zsel):
+                        ChairStore(conn).remove(c.chair_id)
+                    SeatZoneStore(conn).remove(zsel)
+                    db.audit(conn, "desk.delete", actor=role, resource=zsel,
+                             detail="seat zone + chairs removed (history kept)")
+                    conn.commit()
+                    st.success(f"Desk {zsel} deleted.")
+                    st.rerun()
+                except AccessDenied:
+                    st.error("Your role cannot modify desks/zones.")
+                finally:
+                    conn.close()
+
+
+def _employees_readonly():
+    conn = get_readonly_connection()
+    try:
+        return EmployeeStore(conn, WORK_SCHEDULE).list()
+    finally:
+        conn.close()
+
+
+def tab_admin_chairs(role: str) -> None:
+    """Admin → Chairs: define, enable, assign seat-level locations."""
+    st.subheader("Chairs")
+    conn = get_readonly_connection()
+    try:
+        zones = SeatZoneStore(conn).list()
+        chairs = ChairStore(conn).list()
+    finally:
+        conn.close()
+
+    if chairs:
+        zone_name = {z.zone_id: (z.name or z.zone_id) for z in zones}
+        st.dataframe(pd.DataFrame([{
+            "Chair": c.chair_id,
+            "Desk": c.zone_id,
+            "Desk name": zone_name.get(c.zone_id, "—"),
+            "Camera": c.camera_id,
+            "Label": c.label or "—",
+            "Enabled": "✓" if c.enabled else "—",
+            "Assigned to": c.assigned_employee_id or "—",
+        } for c in chairs]), width="stretch")
+
+    if role != "admin":
+        st.caption("Viewer role: read-only.")
+        return
+
+    from src.admin_store import validate_assignment
+    emps = _employees_readonly() or []
+
+    with st.form("p62_chair_create"):
+        st.markdown("**Add chair**")
+        cid = st.text_input("Chair ID (e.g. A1-C1)")
+        zsel = st.selectbox("Desk (zone)",
+                            [z.zone_id for z in zones] or ["(add a desk first)"])
+        cname = st.text_input("Name (optional)")
+        clabel = st.text_input("Label (optional, e.g. A01-C1)")
+        make = st.form_submit_button("Add chair")
+    if make:
+        if not _admin_safe_id(cid):
+            st.error("Chair ID must be letters/digits/_/- only.")
+            return
+        if not zones:
+            st.error("Add a desk (Desks & Zones) first.")
+            return
+        conn = _open_write_conn()
+        try:
+            from src import database as db
+            from src.rbac import AccessGuard, AccessDenied
+            AccessGuard(conn, actor=role, role=role).require_configure_zones()
+            store = ChairStore(conn)
+            if store.get(cid):
+                st.error(f"Chair {cid} already exists.")
+            else:
+                z = next(z for z in zones if z.zone_id == zsel)
+                store.add(chair_id=cid, camera_id=z.camera_id, zone_id=zsel,
+                          name=cname, label=clabel, enabled=True)
+                db.audit(conn, "chair.create", actor=role, resource=cid,
+                         detail=f"zone={zsel}")
+                conn.commit()
+                st.success(f"Chair {cid} added.")
+                st.rerun()
+        except AccessDenied:
+            st.error("Your role cannot modify chairs.")
+        finally:
+            conn.close()
+
+    if chairs:
+        st.divider()
+        with st.form("p62_chair_edit"):
+            st.markdown("**Edit chair** — name, label, desk, enabled")
+            csel = st.selectbox("Chair", [c.chair_id for c in chairs])
+            c = next((c for c in chairs if c.chair_id == csel), None)
+            cname = st.text_input("Name", value=(c.name if c else ""),
+                                  key="p62_chair_edit_name")
+            clabel = st.text_input("Label", value=(c.label if c else ""))
+            zsel = st.selectbox("Desk (zone)",
+                                [z.zone_id for z in zones] or [c.zone_id],
+                                index=([z.zone_id for z in zones].index(c.zone_id)
+                                       if c and c.zone_id in [z.zone_id for z in zones]
+                                       else 0))
+            cen = st.checkbox("Enabled", value=bool(c and c.enabled),
+                              key="p62_chair_edit_en")
+            edit = st.form_submit_button("Save chair")
+        if edit:
+            if not zones:
+                st.error("Add a desk (Desks & Zones) first.")
+                return
+            conn = _open_write_conn()
+            try:
+                from src import database as db
+                from src.rbac import AccessGuard, AccessDenied
+                AccessGuard(conn, actor=role, role=role).require_configure_zones()
+                z = next(z for z in zones if z.zone_id == zsel)
+                ChairStore(conn).update(csel, name=cname, label=clabel,
+                                        camera_id=z.camera_id, zone_id=zsel,
+                                        enabled=cen)
+                db.audit(conn, "chair.update", actor=role, resource=csel,
+                         detail=f"zone={zsel}")
+                conn.commit()
+                st.success(f"Chair {csel} saved.")
+                st.rerun()
+            except AccessDenied:
+                st.error("Your role cannot modify chairs.")
+            finally:
+                conn.close()
+
+        st.divider()
+        with st.form("p62_chair_assign"):
+            st.markdown("**Assign employee to chair** (context hint only)")
+            csel = st.selectbox("Chair", [c.chair_id for c in chairs],
+                                key="p62_chair_assign_sel")
+            emp_choice = st.selectbox(
+                "Employee — or blank to unassign",
+                [""] + [e.employee_id for e in emps],
+                index=0, key="p62_chair_assign_emp")
+            do_assign = st.form_submit_button("Save")
+        if do_assign:
+            conn = _open_write_conn()
+            try:
+                from src import database as db
+                from src.rbac import AccessGuard, AccessDenied
+                problems = validate_assignment(
+                    conn, chair_id=csel, employee_id=emp_choice or None)
+                if problems:
+                    st.error("; ".join(problems))
+                else:
+                    AccessGuard(conn, actor=role,
+                                role=role).require_configure_zones()
+                    ChairStore(conn).set_assignment(csel, emp_choice or None)
+                    db.audit(conn, "chair.assignment", actor=role,
+                             resource=csel,
+                             detail=f"employee={emp_choice or '<cleared>'}")
+                    conn.commit()
+                    st.success(f"Chair {csel} assignment saved.")
+                    st.rerun()
+            except AccessDenied:
+                st.error("Your role cannot modify chairs.")
+            finally:
+                conn.close()
+
+        st.divider()
+        with st.form("p62_chair_delete"):
+            st.markdown("**Delete chair** — config only; history untouched")
+            csel = st.selectbox("Chair", [c.chair_id for c in chairs],
+                                key="p62_chair_del_sel")
+            confirm = st.checkbox("Confirm: delete this chair config")
+            do_del = st.form_submit_button("Delete chair")
+        if do_del:
+            if not confirm:
+                st.error("Tick the confirmation box to delete.")
+            else:
+                conn = _open_write_conn()
+                try:
+                    from src import database as db
+                    from src.rbac import AccessGuard, AccessDenied
+                    AccessGuard(conn, actor=role,
+                                role=role).require_configure_zones()
+                    ChairStore(conn).remove(csel)
+                    db.audit(conn, "chair.delete", actor=role, resource=csel,
+                             detail="chair config removed (history kept)")
+                    conn.commit()
+                    st.success(f"Chair {csel} deleted.")
+                    st.rerun()
+                except AccessDenied:
+                    st.error("Your role cannot modify chairs.")
+                finally:
+                    conn.close()
+
+
+def tab_admin_schedule(role: str) -> None:
+    """Admin → Schedule: the single authoritative office/lunch schedule."""
+    st.subheader("Office & Lunch Schedule")
+    conn = get_readonly_connection()
+    settings = None
+    if conn is not None:
+        try:
+            from src.admin_store import SettingsStore
+            settings = SettingsStore(conn).get()
+        finally:
+            conn.close()
+    if settings is None:
+        st.error("Database unavailable.")
+        return
+    st.caption(
+        "Persisted in the application database and applied to the runtime on "
+        "save + at daemon startup. Office hours and lunch must be HH:MM (24h), "
+        "lunch inside office hours, timezone a valid IANA zone (default "
+        "Asia/Kolkata)."
+    )
+    if role != "admin":
+        st.caption("Viewer role: read-only.")
+        return
+
+    with st.form("p62_sched"):
+        tz = st.text_input("Timezone (IANA)", settings.tz)
+        c1, c2 = st.columns(2)
+        os_ = c1.text_input("Office start (HH:MM)", settings.office_start)
+        oe = c2.text_input("Office end (HH:MM)", settings.office_end)
+        c3, c4 = st.columns(2)
+        ls = c3.text_input("Lunch start (HH:MM)", settings.lunch_start)
+        le = c4.text_input("Lunch end (HH:MM)", settings.lunch_end)
+        save = st.form_submit_button("Save schedule")
+    if save:
+        conn = _open_write_conn()
+        try:
+            from src.admin_store import SettingsStore
+            from src.rbac import AccessGuard, AccessDenied
+            AccessGuard(conn, actor=role, role=role).require_configure_settings()
+            SettingsStore(conn).update(actor=role, timezone=tz,
+                                       office_start=os_, office_end=oe,
+                                       lunch_start=ls, lunch_end=le)
+            SettingsStore(conn).apply_to_config()
+            conn.commit()
+            st.success("Schedule saved and applied to the runtime.")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+        except AccessDenied:
+            st.error("Your role cannot change the schedule.")
+        finally:
+            conn.close()
+
+
+def tab_admin_thresholds(role: str) -> None:
+    """Admin → Thresholds: away/phone/talking knobs + the Phase 63 phone pass."""
+    st.subheader("Detection Thresholds")
+    conn = get_readonly_connection()
+    settings = None
+    if conn is not None:
+        try:
+            from src.admin_store import SettingsStore
+            settings = SettingsStore(conn).get()
+        finally:
+            conn.close()
+    if settings is None:
+        st.error("Database unavailable.")
+        return
+    st.caption(
+        "Centralized, persisted thresholds (seconds). Defaults: away 10 s, "
+        "phone 5 s, talking 15 s. Away/phone are wired into the live "
+        "employee FSM; phone-pass knobs below steer the dedicated YOLO phone "
+        "detection pass. Unpersisted knobs keep their env defaults."
+    )
+    if role != "admin":
+        st.caption("Viewer role: read-only.")
+        return
+
+    with st.form("p62_thresh"):
+        c1, c2, c3 = st.columns(3)
+        away = c1.number_input(
+            "Away threshold (seconds)", min_value=0.0, step=1.0,
+            value=float(settings.away_seconds))
+        phone = c2.number_input(
+            "Phone threshold (seconds)", min_value=0.0, step=1.0,
+            value=float(settings.phone_seconds))
+        talking = c3.number_input(
+            "Talking threshold (seconds)", min_value=0.0, step=1.0,
+            value=float(settings.talking_seconds))
+        st.divider()
+        st.markdown("**Phone detection pass (Phase 63)**")
+        st.caption(
+            "Steers the cadence-gated, higher-resolution phone pass. Empty "
+            "model path = reuse the base YOLO model (COCO class 67).")
+        p_class = st.number_input(
+            "Phone class id", min_value=0, max_value=999, step=1,
+            value=int(settings.phone_class), help="67 = COCO cell phone; a "
+            "fine-tuned single-class model commonly uses 0.")
+        p_model = st.text_input(
+            "Phone model path (absolute .pt path, empty = base model)",
+            value=str(settings.phone_model_path))
+        pc1, pc2, pc3 = st.columns(3)
+        p_imgsz = pc1.number_input(
+            "Phone pass resolution (imgsz)", min_value=32, max_value=4096,
+            step=32, value=int(settings.phone_imgsz))
+        p_cadence = pc2.number_input(
+            "Phone pass cadence (cycles)", min_value=1, max_value=60, step=1,
+            value=int(settings.phone_cadence))
+        p_ev = pc3.number_input(
+            "Evidence window (frames)", min_value=1, max_value=60, step=1,
+            value=int(settings.phone_evidence_window))
+        p_ev_min = st.number_input(
+            "Evidence minimum (frames within window)", min_value=1,
+            max_value=60, step=1, value=int(settings.phone_evidence_min),
+            help="Raw phone observations required inside the trailing window "
+            "before a track reports phone (temporal hysteresis).")
+        save = st.form_submit_button("Save thresholds")
+    if save:
+        conn = _open_write_conn()
+        try:
+            from src.admin_store import SettingsStore
+            from src.rbac import AccessGuard, AccessDenied
+            AccessGuard(conn, actor=role, role=role).require_configure_settings()
+            SettingsStore(conn).update(
+                actor=role, away_seconds=away, phone_seconds=phone,
+                talking_seconds=talking, phone_class=p_class,
+                phone_model_path=p_model, phone_imgsz=p_imgsz,
+                phone_cadence=p_cadence, phone_evidence_window=p_ev,
+                phone_evidence_min=p_ev_min)
+            SettingsStore(conn).apply_to_config()
+            conn.commit()
+            st.success("Thresholds saved and applied.")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+        except AccessDenied:
+            st.error("Your role cannot change thresholds.")
+        finally:
+            conn.close()
+
+
+def tab_admin_system(role: str) -> None:
+    """Admin → System: read-only inspection of persisted admin state."""
+    st.subheader("System")
+    conn = get_readonly_connection()
+    if conn is None:
+        st.error("Database unavailable.")
+        return
+    try:
+        from src import database as db
+        from src.admin_store import SettingsStore
+        store = SettingsStore(conn)
+        snapshot = store.snapshot()
+        apply_state = db.get_camera_apply_state(conn)
+        tries = conn.execute(
+            "SELECT count(*) FROM admin_cameras").fetchone()
+        cam_count = int(tries[0]) if tries else 0
+    except Exception as exc:  # pragma: no cover - surface gracefully
+        st.error(f"Could not read system state: {exc}")
+        return
+    finally:
+        conn.close()
+
+    st.dataframe(pd.DataFrame([
+        {"Setting": k, "Value": str(v)} for k, v in snapshot.items()
+    ]), width="stretch")
+    if apply_state:
+        st.info(f"**Camera apply state** — requested rev "
+                f"`{apply_state['requested_revision'] or '—'}` · applied rev "
+                f"`{apply_state['applied_revision'] or '—'}` · "
+                f"{apply_state.get('detail') or ''}")
+    st.caption(f"Admin cameras persisted: {cam_count}. History is never "
+               f"deleted by enable/disable or delete actions.")
+
+
 def main():
     role = do_auth()
     if not role:
@@ -2253,6 +3500,10 @@ def main():
         tab_reports(role)
     elif page == "analytics":
         tab_historical()
+    elif page == "cameras":
+        tab_admin_cameras(role)
+    elif page == "admin":
+        tab_admin(role)
     elif page == "settings":
         tab_settings()
     else:

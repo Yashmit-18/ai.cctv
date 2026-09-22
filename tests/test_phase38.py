@@ -167,10 +167,10 @@ def test_dashboard_shell_renders_navigation_without_exception():
     at = _app_streamlit()
     at.run()
     assert not at.exception, at.exception
-    # Phase 42: the app now uses a sidebar navigation shell (all eight pages)
-    # instead of the old tab bar.
+    # Phase 42 / Phase 62: the app uses a sidebar navigation shell (all ten
+    # pages) instead of the old tab bar.
     assert len(at.sidebar.radio) >= 1
-    assert len(at.sidebar.radio[0].options) == 8
+    assert len(at.sidebar.radio[0].options) == 10
 
 
 def test_dashboard_body_never_exposes_credentials():

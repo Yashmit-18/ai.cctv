@@ -132,6 +132,126 @@ def build_cameras() -> dict[str, str]:
             cameras[f"cam_{_i:02d}"] = _url
     return cameras
 
+
+# ============================================================
+# PHASE 58 -- production camera configuration model
+# ------------------------------------------------------------
+# Extension of the multi-camera pool.  In addition to the URL env var:
+#     CCTV_CAM_<NN>_URL
+# each camera slot supports optional richer configuration:
+#     CCTV_CAM_<NN>_NAME       human-readable name (default = camera id)
+#     CCTV_CAM_<NN>_TYPE       source kind: local | rtsp | video_file | test
+#     CCTV_CAM_<NN>_ENABLED    0/1 (default 1; disabled slots are excluded)
+#     CCTV_CAM_<NN>_LOCATION   free-text location (e.g. "Lobby", "NVR ch.3")
+#     CCTV_CAM_<NN>_FPS        per-camera processing target (0 = system)
+#     CCTV_CAM_<NN>_RECONNECT_BASE / _MAX / _FACTOR  (seconds; bounded)
+#     CCTV_CAM_<NN>_USERNAME   optional split credentials (never logged or
+#                              displayed; used only to build the URL)
+#     CCTV_CAM_<NN>_PASSWORD
+# URLs may carry credentials (rtsp://user:pass@host/stream) OR split creds may
+# be supplied separately -- either way credentials are never written to logs,
+# reports, the dashboard, or this config's outward-facing shapes.
+# ============================================================
+from src.domain import CameraConfig, CameraSourceKind  # noqa: E402
+
+
+def _parse_camera_flag(raw: str | None, default: bool) -> bool:
+    raw = (raw or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def _parse_reconnect(value: str | None, default: float) -> float:
+    try:
+        v = float((value or "").strip())
+        if v > 0:
+            return v
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
+def camera_configs() -> dict[str, CameraConfig]:
+    """Load the full per-camera configuration model (Phase 58).
+
+    Every configured camera slot yields a ``CameraConfig``.  A slot is
+    included (enabled) when it has a usable URL (or split host URL) and is
+    not explicitly disabled.  Disabled / empty slots are omitted so the
+    pool scales with however many cameras are really on.
+
+    Credential handling: a URL that already embeds ``user:pass@`` is kept
+    as-is (the config display/serialization never writes it out raw);
+    ``_USERNAME``/``_PASSWORD`` split creds are folded into the URL exactly
+    once (if not already present).  Either route keeps secrets out of logs.
+    """
+    cameras: dict[str, CameraConfig] = {}
+    for _i in range(1, _NUM_CAMERAS + 1):
+        _pad = f"{_i:02d}"
+        _url = os.getenv(f"CCTV_CAM_{_pad}_URL", "").strip()
+        _enabled_raw = os.getenv(f"CCTV_CAM_{_pad}_ENABLED", "").strip()
+        _kind_raw = os.getenv(f"CCTV_CAM_{_pad}_TYPE", "").strip().lower()
+        _username = os.getenv(f"CCTV_CAM_{_pad}_USERNAME", "").strip()
+        _password = os.getenv(f"CCTV_CAM_{_pad}_PASSWORD", "").strip()
+        _name = os.getenv(f"CCTV_CAM_{_pad}_NAME", "").strip()
+        _location = os.getenv(f"CCTV_CAM_{_pad}_LOCATION", "").strip()
+
+        if not _url and _username:
+            # Split-credential mode without a URL -- cannot infer a target.
+            _url = ""
+        if not _url:
+            if _enabled_raw and _parse_camera_flag(_enabled_raw, True):
+                continue  # explicitly enabled but unusable --> omitted here.
+            continue
+
+        _kind = CameraSourceKind.RTSP
+        if _kind_raw:
+            for _k in CameraSourceKind:
+                if _k.value == _kind_raw:
+                    _kind = _k
+                    break
+        else:
+            _kind = CameraSourceKind.infer(_url)
+
+        # Fold split creds into the URL exactly once (only for RTSP).
+        if _kind is CameraSourceKind.RTSP and _username:
+            _rest = _url.split("://", 1)[-1]
+            _authority = _rest.split("/", 1)[0] if "/" in _rest else _rest
+            if "@" not in _authority:
+                _creds = f"{_username}:{_password}" if _password else _username
+                _url = _url.replace(f"://{_authority}", f"://{_creds}@{_authority}", 1)
+
+        _fps_raw = os.getenv(f"CCTV_CAM_{_pad}_FPS", "").strip()
+        _fps = 0.0
+        try:
+            _fps = float(_fps_raw) if _fps_raw else 0.0
+        except ValueError:
+            _fps = 0.0
+
+        cameras[f"cam_{_pad}"] = CameraConfig(
+            camera_id=f"cam_{_pad}",
+            name=_name or f"cam_{_pad}",
+            kind=_kind,
+            url=_url,
+            username=_username,
+            password=_password,
+            enabled=True,
+            location=_location,
+            fps_target=_fps,
+            reconnect_base=_parse_reconnect(
+                os.getenv(f"CCTV_CAM_{_pad}_RECONNECT_BASE", ""), 2.0),
+            reconnect_max=_parse_reconnect(
+                os.getenv(f"CCTV_CAM_{_pad}_RECONNECT_MAX", ""), 30.0),
+            reconnect_factor=_parse_reconnect(
+                os.getenv(f"CCTV_CAM_{_pad}_RECONNECT_FACTOR", ""), 2.5),
+        )
+    return cameras
+
+
+CAMERA_CONFIGS: dict[str, CameraConfig] = camera_configs()
+
 # ============================================================
 # DESK ROIs  (multi-desk, x/y/w/h in video-frame pixel coords)
 # ------------------------------------------------------------
@@ -438,6 +558,26 @@ LEFT_DEBOUNCE_SEC = float(os.getenv("CCTV_LEFT_DEBOUNCE", "10"))
 
 # Structured per-face / per-frame debug (existing) plus motion/track gating.
 DETECTION_DEBUG = os.getenv("CCTV_DETECTION_DEBUG", "0") == "1"
+
+# ============================================================
+# DESK / SEAT ZONE TRACKING  (Phase 59)
+# ------------------------------------------------------------
+# Desk/seat zones annotate which desk a spatial track occupies.  A seat is
+# CONTEXT ONLY: it never becomes an identity authority.  Identity continues to
+# follow the face/appearance pipeline (safe: unknown stays unknown, EMP002 in
+# A01 is never relabelled EMP001).
+SEAT_ZONE_TRACKING = os.getenv("CCTV_SEAT_ZONE_TRACKING", "1") == "1"
+# Optional first-run seeding file (same pattern as security_zones.json).
+SEAT_ZONES_FILE = os.getenv("CCTV_SEAT_ZONES_FILE",
+                            str(PROJECT_ROOT / "data" / "seat_zones.json"))
+# Consecutive frames a footpoint must remain inside a zone before the zone is
+# marked OCCUPIED (temporal stability -- a single noisy frame never flips it).
+SEAT_ZONE_CONFIRM_FRAMES = int(os.getenv("CCTV_SEAT_ZONE_CONFIRM_FRAMES", "5"))
+# Consecutive frames with no person in the zone before it is marked VACANT.
+SEAT_ZONE_CLEAR_FRAMES = int(os.getenv("CCTV_SEAT_ZONE_CLEAR_FRAMES", "8"))
+# Minimum seconds between repeated identity/mismatch events per zone (events
+# are transition-driven; this gates re-identification noise).
+SEAT_EVENT_COOLDOWN_SEC = float(os.getenv("CCTV_SEAT_EVENT_COOLDOWN_SEC", "60"))
 
 # Structured per-camera loop diagnostics (source, mode, resolved index, frame
 # age/fps, usability decision).  Off by default; enabled via CCTV_CAMERA_DEBUG=1.
@@ -916,6 +1056,17 @@ def validate_config(quiet: bool = True) -> list[str]:
         problems.append(
             f"CCTV_REID_GATE_IOU must be in (0,1] (got {REID_GATE_IOU})")
 
+    # Phase 59 -- desk/seat zone tracking settings
+    if SEAT_ZONE_CONFIRM_FRAMES < 1:
+        problems.append(
+            f"CCTV_SEAT_ZONE_CONFIRM_FRAMES must be >= 1 (got {SEAT_ZONE_CONFIRM_FRAMES})")
+    if SEAT_ZONE_CLEAR_FRAMES < 1:
+        problems.append(
+            f"CCTV_SEAT_ZONE_CLEAR_FRAMES must be >= 1 (got {SEAT_ZONE_CLEAR_FRAMES})")
+    if SEAT_EVENT_COOLDOWN_SEC < 0:
+        problems.append(
+            f"CCTV_SEAT_EVENT_COOLDOWN_SEC must be >= 0 (got {SEAT_EVENT_COOLDOWN_SEC})")
+
     for p in problems:
         log("CONFIG: %s", p)
     return problems
@@ -958,3 +1109,65 @@ def runtime_config_snapshot() -> dict:
         "retention_days": RETENTION_DAYS,
         "retention_days_biometrics": RETENTION_DAYS_BIOMETRICS,
     }
+
+
+# ======================================================================
+# Phase 59b -- OFFICE SCHEDULE + FUTURE THRESHOLDS  (additive knobs)
+# ======================================================================
+# Purely additive Phase 59b knobs.  They let an admin define:
+#   1) the OFFICE-MONITORING window (when the scheduler considers the office
+#      in session for desk/chair context) and
+#   2) reserved FUTURE_* threshold knobs used by a LATER engine phase.
+# Nothing here relabels anyone, changes identity, or touches the legacy
+# WORK_SCHEDULE / SECURITY_OFFICE_* constants above.
+# ======================================================================
+
+CCTV_OFFICE_START = os.getenv("CCTV_OFFICE_START", "10:00")
+CCTV_OFFICE_END = os.getenv("CCTV_OFFICE_END", "18:30")
+CCTV_LUNCH_START = os.getenv("CCTV_LUNCH_START", "14:00")
+CCTV_LUNCH_END = os.getenv("CCTV_LUNCH_END", "14:35")
+CCTV_OFFICE_TZ = os.getenv("CCTV_OFFICE_TZ", "Asia/Kolkata")
+
+FUTURE_AWAY_THRESHOLD_SECONDS = float(os.getenv("CCTV_FUTURE_AWAY_SECONDS", "10"))
+FUTURE_PHONE_THRESHOLD_SECONDS = float(os.getenv("CCTV_FUTURE_PHONE_SECONDS", "5"))
+FUTURE_TALKING_THRESHOLD_SECONDS = float(os.getenv("CCTV_FUTURE_TALKING_SECONDS", "15"))
+
+
+def _validate_phase59b():
+    """Additive validation for Phase 59b knobs only.  Raises ValueError when
+    a knob is misconfigured; never re-validates or touches legacy knobs."""
+    if FUTURE_AWAY_THRESHOLD_SECONDS < 0.0:
+        raise ValueError("FUTURE_AWAY_THRESHOLD_SECONDS must be >= 0")
+    if FUTURE_PHONE_THRESHOLD_SECONDS < 0.0:
+        raise ValueError("FUTURE_PHONE_THRESHOLD_SECONDS must be >= 0")
+    if FUTURE_TALKING_THRESHOLD_SECONDS < 0.0:
+        raise ValueError("FUTURE_TALKING_THRESHOLD_SECONDS must be >= 0")
+
+
+_validate_phase59b()
+
+
+# ======================================================================
+# Phase 59c -- CHAIR CONTEXT KNOBS (additive; config surface only)
+# ======================================================================
+# Phase 59c is the CHAIR layer for the Phase 59b office-schedule foundation.
+# Chairs are CONTEXT-ONLY children of a Phase 59b desk/seat zone: they
+# describe *where* someone sits, never *who* they are.
+#
+# Identity rule (identical to seat_zones.py's rule):
+#   * ``assigned_employee_id`` is a HOME-DESK hint ONLY -- it is NEVER an
+#     identity authority and never relabels an occupant.
+#   * A strongly-confirmed EMP002 sitting in EMP001's chair stays EMP002
+#     (only a neutral CHAIR_ASSIGNMENT_MISMATCH context observation is
+#     produced).
+#   * An Unknown face in a chair stays Unknown; an empty chair stays VACANT
+#     (a chair never invents a fake "Away").
+#   * Chairs are DISABLED by default (``CCTV_CHAIRS_ENABLED`` unset -> 0)
+#     and seed only from an OPTIONAL ``CHAIRS_FILE`` when present.
+# ----------------------------------------------------------------------
+CHAIR_TRACKING_ENABLED = os.getenv("CCTV_CHAIRS_ENABLED", "0") == "1"
+CHAIRS_FILE            = os.getenv("CCTV_CHAIRS_FILE",
+                                   str(PROJECT_ROOT / "data" / "chairs.json"))
+CHAIR_CONFIRM_FRAMES   = int(os.getenv("CCTV_CHAIR_CONFIRM_FRAMES", "2"))
+CHAIR_CLEAR_FRAMES     = int(os.getenv("CCTV_CHAIR_CLEAR_FRAMES", "3"))
+CHAIR_EVENT_COOLDOWN_SEC = float(os.getenv("CCTV_CHAIR_EVENT_COOLDOWN_SEC", "30"))

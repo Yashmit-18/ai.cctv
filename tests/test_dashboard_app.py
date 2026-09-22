@@ -96,7 +96,7 @@ def test_sidebar_navigation_switches_every_page_without_exception():
     at.run()
     assert not at.exception, at.exception
     nav = at.sidebar.radio[0]
-    assert len(nav.options) == len(appmodule._NAV_LABELS) == 8
+    assert len(nav.options) == len(appmodule._NAV_LABELS) == 10
     for option in nav.options:
         nav.set_value(option)
         at.run()

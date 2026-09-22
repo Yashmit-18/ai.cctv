@@ -404,6 +404,25 @@ class FaceRegistry:
 
         return self._employee_ids[best_idx], best_score
 
+    def _employee_ranking(self, sims: np.ndarray) -> list[tuple[str, float]]:
+        """Collapse per-row similarities into one score per employee.
+
+        ``sims`` is a 1-D array parallel to ``_employee_ids`` (one value per
+        enrolled embedding).  Each employee id keeps its BEST embedding score
+        (max aggregation -- the cleanest separation, identical to the raw
+        argmax when an employee has a single enrollment, see Phase 57 Step 4),
+        and the resulting ``[(employee_id, score), ...]`` list is sorted
+        descending.  This makes the margin a quantity between distinct
+        employee *identities* instead of between two enrollment samples of the
+        same person -- the Phase 57 root-cause fix.
+        """
+        per_employee: dict[str, float] = {}
+        for i, eid in enumerate(self._employee_ids):
+            s = float(sims[i])
+            if s > per_employee.get(eid, -1.0):
+                per_employee[eid] = s
+        return sorted(per_employee.items(), key=lambda kv: kv[1], reverse=True)
+
     def identify_k(self, face_embedding: np.ndarray, k: int = 2) -> list[tuple[str, float]]:
         """Top-``k`` matching employees by similarity, descending.
 
@@ -412,7 +431,10 @@ class FaceRegistry:
         *who* was nearly recognised (e.g. ``("EMP004", 0.57)`` with decision
         UNKNOWN).  ``identify`` remains the single source of truth for the
         recognition decision; ``identify_k`` is for FACE_DEBUG / diagnostic
-        tools only.  Never prints raw embeddings.
+        tools only.  Each employee id appears at most once (its best embedding
+        wins), so the runner-up is a genuinely different employee -- never a
+        duplicate sample of the leader (Phase 57).  Never prints raw
+        embeddings.
         """
         k = max(1, int(k))
         if self._embeddings is None or len(self._employee_ids) == 0:
@@ -424,10 +446,9 @@ class FaceRegistry:
         if query.shape[-1] != EMBEDDING_DIM or not np.isfinite(query).all():
             return [("Unknown", 0.0)]
 
-        sims = self._embeddings @ query.T
-        sims = sims.flatten()
-        order = np.argsort(-sims)[:k]
-        return [(self._employee_ids[i], float(sims[i])) for i in np.atleast_1d(order)]
+        sims = (self._embeddings @ query.T).flatten()
+        ranked = self._employee_ranking(sims)
+        return ranked[:k]
 
     def identify_candidate(self, face_embedding: np.ndarray) -> dict:
         """Phase 44B gated face decision (CONFIRMED / CANDIDATE / UNKNOWN).
@@ -450,9 +471,11 @@ class FaceRegistry:
            "status": "CONFIRMED"|"CANDIDATE"|"UNKNOWN"}
 
         ``emp_id``/``second_id`` are gallery ids; on UNKNOWN ``emp_id`` is
-        ``"Unknown"`` and ``second_id`` is ``None``.  ``margin`` is
-        ``best - second`` for multi-identity galleries, else ``best`` (a single
-        enrolled identity always carries its full score as margin).  Raw
+        ``"Unknown"`` and ``second_id`` is ``None``.  ``margin`` is the gap
+        between the best score of the leading EMPLOYEE and the best score of
+        the runner-up EMPLOYEE (per-employee max aggregation, Phase 57) --
+        never between two enrollment samples of the same person.  For a
+        single-employee gallery the margin carries the full best score.  Raw
         embeddings are never returned.
         """
         if self._embeddings is None or len(self._employee_ids) == 0:
@@ -467,19 +490,24 @@ class FaceRegistry:
                     "second_id": None, "status": RECOG_UNKNOWN}
 
         sims = (self._embeddings @ query.T).flatten()
-        best_idx = int(np.argmax(sims))
-        best_score = float(sims[best_idx])
-        best_id = self._employee_ids[best_idx]
+
+        # Phase 57 root cause fix: rank EMPLOYEE identities, not individual
+        # enrollment embeddings.  Group the per-row similarities by employee
+        # id (each employee keeps its best embedding score), then measure the
+        # margin between the two best DIFFERENT employees.  Previously the
+        # top-2 could be two enrollment samples of the same person (EMP001 has
+        # 6 embeddings), giving an artificially tiny margin and never
+        # clearing FACE_MARGIN_MIN even though the identity was clear.
+        ranked = self._employee_ranking(sims)
+        best_id, best_score = ranked[0]
 
         if best_score < CANDIDATE_THRESHOLD:
             return {"emp_id": "Unknown", "score": round(best_score, 4),
                     "margin": 0.0, "second_id": None, "status": RECOG_UNKNOWN}
 
-        if len(self._employee_ids) > 1:
-            second_idx = int(np.argpartition(sims, -2)[-2])
-            second_score = float(sims[second_idx])
+        if len(ranked) > 1:
+            second_id, second_score = ranked[1]
             margin = best_score - second_score
-            second_id = self._employee_ids[second_idx]
         else:
             second_score = 0.0
             margin = best_score

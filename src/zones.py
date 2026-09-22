@@ -91,6 +91,15 @@ def _window_active(clock_minutes: int, schedule: dict) -> bool:
                              schedule.get("end"))
 
 
+def point_in_polygon(x: float, y: float, poly: list[tuple[float, float]]) -> bool:
+    """Public ray-casting point-in-polygon test (normalised coords 0..1).
+
+    Shared geometry primitive used by the security-zone layer (Phase 31) and
+    the desk/seat zone layer (Phase 59) so the polygon logic is defined once.
+    """
+    return _point_in_polygon(x, y, poly)
+
+
 def _point_in_polygon(x: float, y: float, poly: list[tuple[float, float]]) -> bool:
     """Ray-casting point-in-polygon test (normalised coords)."""
     inside = False

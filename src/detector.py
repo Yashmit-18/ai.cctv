@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+import config  # noqa: E402  (Phase 63: live phone-pass knob reads)
 from config import (
     CONF_THRESHOLD,
     DETECTION_DEBUG,
@@ -325,16 +326,30 @@ class ActivityDetector:
         # phone model via CCTV_PHONE_MODEL_PATH.  It runs on its own
         # per-camera cadence at a higher input resolution (PHONE_IMGSZ) so
         # small phones finally get boxes the stock 640 pass misses.
+        #
+        # Phase 63: the pass knobs are read LIVE from the ``config`` module
+        # (not bound at import) so an Admin Control Center override applied
+        # by ``SettingsStore.apply_to_config()`` before construction is
+        # honoured; untouched, they resolve to the env defaults below.
+        _phone_class = int(getattr(config, "PHONE_CLASS", CONFIG_PHONE_CLASS)
+                           or CONFIG_PHONE_CLASS)
+        _phone_model_path = str(getattr(config, "PHONE_MODEL_PATH",
+                                        PHONE_MODEL_PATH) or PHONE_MODEL_PATH)
+        _phone_imgsz = int(getattr(config, "PHONE_IMGSZ", PHONE_IMGSZ)
+                           or PHONE_IMGSZ)
+        _phone_cadence = max(1, int(getattr(config, "PHONE_DETECT_CADENCE",
+                                            PHONE_DETECT_CADENCE)
+                                    or PHONE_DETECT_CADENCE))
         self._phone_detector = PhoneDetector(
             model=self.model,
-            model_path=str(PHONE_MODEL_PATH),
-            phone_class=int(CONFIG_PHONE_CLASS),
+            model_path=_phone_model_path,
+            phone_class=_phone_class,
             conf=self.conf,
-            imgsz=int(PHONE_IMGSZ),
+            imgsz=_phone_imgsz,
             device=self._device,
             half=self._half,
         )
-        self._phone_cadence = max(1, int(PHONE_DETECT_CADENCE))
+        self._phone_cadence = _phone_cadence
         self._phone_ticks: dict[str, int] = {}
         # Appearance ReID is a secondary identity signal: it may only resolve
         # tracks face recognition cannot identify (enforced in tracker.py).

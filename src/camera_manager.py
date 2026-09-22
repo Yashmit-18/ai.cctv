@@ -35,14 +35,23 @@ class MultiCameraManager:
     cameras : dict[str, str] | None
         Mapping of camera_id -> source (RTSP URL, file, or index).
         Defaults to ``config.CAMERAS``.
+    configs : dict[str, CameraConfig] | None
+        Optional (Phase 58) richer per-camera configuration.  When supplied,
+        a camera is only started if its config ``enabled`` is True, and the
+        config's per-camera reconnect policy/kind are applied.  A camera that
+        appears in ``configs`` but not in ``cameras`` is still started (from
+        its config URL); a camera in ``cameras`` with no config entry keeps
+        the legacy plain-source behaviour.
     max_batch : int | None
         Largest number of live frames to emit in a single batch.  ``None``
         emits one entry per configured camera.
     """
 
     def __init__(self, cameras: dict[str, str] | None = None,
+                 configs: dict | None = None,
                  max_batch: int | None = None):
         self._cameras = dict(cameras) if cameras is not None else dict(CAMERAS)
+        self._configs: dict[str, dict] = dict(configs) if configs else {}
         self._max_batch = max_batch
         self._captures: dict[str, VideoCapture] = {}
         self._lock = threading.Lock()
@@ -56,13 +65,149 @@ class MultiCameraManager:
         with self._lock:
             if self._started:
                 return self
-            self._captures = {
-                cam_id: VideoCapture(source=url).start()
-                for cam_id, url in self._cameras.items()
-            }
+            captures: dict[str, VideoCapture] = {}
+            # Phase 58: full config model (name/enabled/reconnect/kind).  A
+            # disabled camera is excluded from the pool entirely.
+            for cam_id, cfg in self._configs.items():
+                params = MultiCameraManager._cfg(cfg, self._cameras.get(cam_id, ""))
+                if params is None:
+                    continue  # disabled / no usable source
+                src, kind, reconnect = params
+                cap = VideoCapture(
+                    source=src,
+                    kind=kind or None,
+                    camera_id=cam_id,
+                    reconnect=reconnect,
+                ).start()
+                captures[cam_id] = cap
+            # Legacy sources not covered by the config model.
+            for cam_id, url in self._cameras.items():
+                if cam_id in captures:
+                    continue
+                captures[cam_id] = VideoCapture(source=url).start()
+            self._captures = captures
             self._started = True
             logger.info("Started %d camera streams.", len(self._captures))
         return self
+
+    @staticmethod
+    def _cfg(cfg, legacy_src: str) -> tuple[str, object, tuple[float, float, float]] | None:
+        """Normalize a config entry (dict or CameraConfig dataclass).
+
+        Returns ``(source, kind, reconnect_policy)`` or ``None`` when the
+        camera is disabled or has no usable source.
+        """
+        def _get(key, default=None):
+            if isinstance(cfg, dict):
+                return cfg.get(key, default)
+            return getattr(cfg, key, default)
+
+        if not _get("enabled", True):
+            return None
+        src = _get("url")
+        if src is None or src == "":
+            src = legacy_src
+        if src is None or (isinstance(src, str) and not src):
+            return None
+        kind = _get("kind")
+        reconn = (
+            _get("reconnect_base", 2.0),
+            _get("reconnect_max", 30.0),
+            _get("reconnect_factor", 2.5),
+        )
+        return src, kind, reconn
+
+    @staticmethod
+    def _kind_str(kind) -> str:
+        """Normalize a ``CameraSourceKind`` (or its string value) to text."""
+        if kind is None:
+            return ""
+        return getattr(kind, "value", str(kind))
+
+    @staticmethod
+    def _same_source(cap, src, kind, reconnect) -> bool:
+        """Whether a running capture already serves the desired source - so a
+        reconcile can keep it untouched instead of rebuilding it."""
+        if str(getattr(cap, "source", None)) != str(src):
+            return False
+        if MultiCameraManager._kind_str(getattr(cap, "kind", None)) != \
+                MultiCameraManager._kind_str(kind):
+            return False
+        return tuple(getattr(cap, "_reconnect_cfg", (2.0, 30.0, 2.5))) == \
+            tuple(reconnect)
+
+    def apply_configs(self, configs: dict) -> dict:
+        """Reconcile the running pool with a new Phase 58 configuration set
+        (Phase 61 runtime reload).
+
+        * cameras disabled/removed from the set are stopped and closed;
+        * cameras whose source/kind/reconnect policy changed are closed and
+          reopened with the new source;
+        * cameras still configured are started when new to this pool;
+        * cameras with an unchanged source are left running untouched.
+
+        Returns a summary dict ``{"started", "updated", "kept", "stopped"}``.
+        This is incremental: it never rebuilds the whole pool and never touches
+        unaffected cameras.
+        """
+        desired: dict[str, tuple] = {}
+        for cam_id, cfg in dict(configs).items():
+            params = MultiCameraManager._cfg(cfg, self._cameras.get(cam_id, ""))
+            if params is None:
+                continue  # disabled or no usable source -> must not run
+            desired[cam_id] = params
+
+        with self._lock:
+            before = dict(self._captures)
+            self._configs = dict(configs)
+
+        if not self._started:
+            # Pool not started yet: just remember the configs for start().
+            return {"started": 0, "updated": 0, "kept": 0, "stopped": 0,
+                    "stored": True}
+
+        stop_list: list = []
+        new_caps: dict[str, object] = {}
+        started = updated = kept = stopped = 0
+        for cam_id, cap in before.items():
+            params = desired.get(cam_id)
+            if params is None:
+                stop_list.append(cap)
+                stopped += 1
+                continue
+            src, kind, reconnect = params
+            if MultiCameraManager._same_source(cap, src, kind, reconnect):
+                new_caps[cam_id] = cap
+                kept += 1
+            else:
+                stop_list.append(cap)
+                updated += 1  # closed below, reopened from new source
+
+        for cam_id, params in desired.items():
+            if cam_id in new_caps:
+                continue
+            src, kind, reconnect = params
+            cap = VideoCapture(
+                source=src,
+                kind=kind or None,
+                camera_id=cam_id,
+                reconnect=reconnect,
+            ).start()
+            new_caps[cam_id] = cap
+            if cam_id in before:
+                updated += 0  # replacement already counted above
+            else:
+                started += 1
+
+        with self._lock:
+            self._captures = new_caps
+        for cap in stop_list:
+            cap.stop()
+        logger.info(
+            "Camera config applied: %d started, %d updated, %d kept, %d stopped.",
+            started, updated, kept, stopped)
+        return {"started": started, "updated": updated, "kept": kept,
+                "stopped": stopped}
 
     def stop(self):
         with self._lock:

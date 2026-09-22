@@ -7,6 +7,7 @@ everywhere without side effects (no config / env loading here).
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, field
 
 # ----------------------------------------------------------------------
@@ -53,6 +54,10 @@ CAM_NO_FRAME: str = "NO_FRAME"
 CAM_FROZEN: str = "FROZEN_FRAME"
 CAM_LOW_FPS: str = "LOW_FPS"
 CAM_DEGRADED: str = "DEGRADED"  # umbrella: FROZEN_FRAME / LOW_FPS / NO_FRAME
+# Phase 58: frame-content gate used when a live camera is producing a dark or
+# blank feed (mean brightness below BLACK_FRAME_MEAN).  Never grounds an
+# employee AWAY -- the feed simply cannot be trusted for productivity states.
+CAM_DARK_BLANK_FRAME: str = "DARK_BLANK_FRAME"
 
 CAMERA_HEALTH_ORDER: tuple[str, ...] = (
     CAM_ONLINE, CAM_LOW_FPS, CAM_FROZEN, CAM_NO_FRAME, CAM_RECONNECTING,
@@ -60,6 +65,103 @@ CAMERA_HEALTH_ORDER: tuple[str, ...] = (
 )
 
 DEGRADED_STATES: tuple[str, ...] = (CAM_FROZEN, CAM_LOW_FPS, CAM_NO_FRAME)
+
+
+# ----------------------------------------------------------------------
+# Camera source kinds  (Phase 58)
+# ----------------------------------------------------------------------
+SourceKind = str
+
+
+class CameraSourceKind(str, enum.Enum):
+    """The kind of video source a camera is fed by.
+
+    All kinds ultimately deliver the same type of frame to the AI pipeline
+    (the common camera-source abstraction is ``VideoCapture`` in
+    ``src/camera.py``); this only tags *how* the source is opened.
+    """
+
+    LOCAL = "local"
+    RTSP = "rtsp"
+    VIDEO_FILE = "video_file"
+    TEST = "test"
+
+    @classmethod
+    def infer(cls, source) -> "CameraSourceKind":
+        """Best-effort kind guess for  a raw ``source`` value.
+
+        * int / numeric string -> LOCAL (device index)
+        * string starting ``rtsp:`` -> RTSP
+        * ``test`` reserved marker -> TEST
+        * anything else (e.g. ``.mp4`` path) -> VIDEO_FILE
+        """
+        s = str(source).strip().lower()
+        if isinstance(source, int) or s.isdigit():
+            return cls.LOCAL
+        if s in ("webcam", "local", "laptop", "usb"):
+            return cls.LOCAL
+        if s.startswith("rtsp:"):
+            return cls.RTSP
+        if s == "test":
+            return cls.TEST
+        return cls.VIDEO_FILE
+
+
+@dataclass(frozen=True)
+class CameraConfig:
+    """Production-safe per-camera configuration (Phase 58).
+
+    Never expose ``password`` beyond construction: ``display()`` and
+    ``safe_dict()`` are the ONLY approved outward shapes and they never
+    include credentials or fully-authenticated URLs.
+    """
+
+    camera_id: str
+    name: str
+    kind: CameraSourceKind = CameraSourceKind.RTSP
+    url: str = ""                       # raw RTSP/file source (may embed creds)
+    username: str = ""
+    password: str = ""
+    enabled: bool = True
+    location: str = ""
+    fps_target: float = 0.0             # 0 = use system default
+    reconnect_base: float = 2.0
+    reconnect_max: float = 30.0
+    reconnect_factor: float = 2.5
+
+    def display(self) -> str:
+        """Single-line, credential-free summary for logs/reports."""
+        if self.kind is CameraSourceKind.RTSP:
+            return (f"{self.camera_id} ({self.name or self.camera_id}) "
+                    f"RTSP host={self._rtsp_host()} credentials=REDACTED")
+        return f"{self.camera_id} ({self.name or self.camera_id}) {self.kind.value}"
+
+    def safe_dict(self) -> dict:
+        """Serializable config snapshot with credentials redacted."""
+        return {
+            "id": self.camera_id,
+            "name": self.name,
+            "kind": self.kind.value,
+            "enabled": self.enabled,
+            "location": self.location,
+            "fps_target": self.fps_target,
+            "reconnect_base": self.reconnect_base,
+            "reconnect_max": self.reconnect_max,
+            "reconnect_factor": self.reconnect_factor,
+            "host": self._rtsp_host() if self.kind is CameraSourceKind.RTSP else "",
+            "credentials": "REDACTED",
+        }
+
+    def _rtsp_host(self) -> str:
+        """Host only (no credentials) from an RTSP URL, or '' if unparseable."""
+        s = self.url or ""
+        if s.startswith("rtsp://"):
+            rest = s[len("rtsp://"):]
+            authority = rest.split("/", 1)[0]
+            if "@" in authority:
+                authority = authority.rsplit("@", 1)[-1]
+            return f"rtsp://{authority}"
+        return ""
 
 # ----------------------------------------------------------------------
 # Security event types  (Phase 31)
@@ -200,6 +302,7 @@ PERM_CONFIGURE_CAMERAS = "configure_cameras"
 PERM_CONFIGURE_ZONES = "configure_zones"
 PERM_CONFIGURE_ALERTS = "configure_alerts"
 PERM_MANAGE_USERS = "manage_users"
+PERM_CONFIGURE_SETTINGS = "configure_settings"
 
 # Default permission set per role.  UI checks are a convenience, NOT a
 # security boundary -- privileged actions are audited and the dashboard
@@ -209,7 +312,7 @@ ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
         PERM_VIEW, PERM_INVESTIGATE, PERM_ACKNOWLEDGE, PERM_RESOLVE,
         PERM_DISMISS, PERM_EXPORT, PERM_VIEW_EVIDENCE, PERM_DELETE_EVIDENCE,
         PERM_CONFIGURE_CAMERAS, PERM_CONFIGURE_ZONES, PERM_CONFIGURE_ALERTS,
-        PERM_MANAGE_USERS,
+        PERM_MANAGE_USERS, PERM_CONFIGURE_SETTINGS,
     ),
     ROLE_SECURITY_OPERATOR: (
         PERM_VIEW, PERM_INVESTIGATE, PERM_ACKNOWLEDGE, PERM_RESOLVE,
@@ -268,6 +371,7 @@ class Employee:
     designation: str = ""
     active: bool = True
     enrolled: bool = False
+    display_name: str = ""
     schedule: "WorkSchedule | None" = None
     metadata: dict = field(default_factory=dict)
 

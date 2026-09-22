@@ -44,6 +44,7 @@ class EmployeeStore:
             designation=row.get("designation", ""),
             active=bool(row.get("active", 1)),
             enrolled=bool(row.get("enrolled", 0)),
+            display_name=row.get("display_name", ""),
             schedule=self._default_schedule,
         )
 
@@ -56,6 +57,7 @@ class EmployeeStore:
                 designation=r.get("designation", ""),
                 active=bool(r.get("active", 1)),
                 enrolled=bool(r.get("enrolled", 0)),
+                display_name=r.get("display_name", ""),
                 schedule=self._default_schedule,
             )
             for r in db.list_employees(self._conn, include_inactive=include_inactive)
@@ -85,6 +87,11 @@ class EmployeeStore:
 
     def set_active(self, employee_id: str, active: bool):
         db.set_employee_active(self._conn, employee_id, active)
+
+    def set_display_name(self, employee_id: str, display_name: str | None) -> None:
+        """Rename the presentation label (Phase 62).  ``employee_id`` (the
+        canonical identity) and all historical ownership stay unchanged."""
+        db.set_employee_display_name(self._conn, employee_id, display_name)
 
     def set_enrolled(self, employee_id: str, enrolled: bool):
         db.set_employee_enrolled(self._conn, employee_id, enrolled)

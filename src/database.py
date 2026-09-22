@@ -256,6 +256,62 @@ CAMERA_HEALTH_SCHEMA = """
     )
 """
 
+# Phase 61 -- persistent ADMIN camera management.  This is the authoritative
+# runtime camera configuration store (the daemon consumes it).  It is separate
+# from the Phase 32 ``camera_config`` metadata table (reliability annotations,
+# never credential-bearing) so secrets are never carried by histories of the
+# older table.  ``password`` lives here only so the transport boundary can
+# recompose the RTSP URL; every outward shape redacts it.
+ADMIN_CAMERAS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS admin_cameras (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        camera_id        TEXT UNIQUE NOT NULL,
+        name             TEXT NOT NULL DEFAULT '',
+        kind             TEXT NOT NULL DEFAULT 'rtsp',
+        enabled          INTEGER NOT NULL DEFAULT 1,
+        location         TEXT NOT NULL DEFAULT '',
+        url              TEXT NOT NULL DEFAULT '',
+        username         TEXT NOT NULL DEFAULT '',
+        password         TEXT NOT NULL DEFAULT '',
+        fps_target       REAL NOT NULL DEFAULT 0,
+        reconnect_base   REAL NOT NULL DEFAULT 2.0,
+        reconnect_max    REAL NOT NULL DEFAULT 30.0,
+        reconnect_factor REAL NOT NULL DEFAULT 2.5,
+        created_at       TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        updated_at       TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+"""
+
+# Single-row handshake between the dashboard and the daemon for the
+# "Apply Camera Configuration" protocol: the dashboard writes a requested
+# revision; the daemon, on seeing it (or a store revision change), applies the
+# configuration and records the applied revision/timestamp.  No new channels
+# are needed - the existing application database is the shared bus.
+CAMERA_APPLY_STATE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS camera_apply_state (
+        id                 INTEGER PRIMARY KEY CHECK (id = 1),
+        requested_revision TEXT NOT NULL DEFAULT '',
+        requested_at       TEXT,
+        applied_revision   TEXT NOT NULL DEFAULT '',
+        applied_at         TEXT,
+        detail             TEXT NOT NULL DEFAULT ''
+    )
+"""
+
+# Phase 62 -- centralized_admin *persistent* office configuration.  A minimal
+# key/value settings table IN the existing application database (no second KV
+# store / no session-state-only config).  Holds the schedule + thresholds the
+# Admin Control Center manages; the runtime reads them as the authoritative
+# values (falling back to env defaults when a key is absent).  Nothing here is
+# secret-bearing -- credentials never live in settings.
+SETTINGS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+"""
+
 DETECTOR_REGISTRY_SCHEMA = """
     CREATE TABLE IF NOT EXISTS detector_registry (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -413,6 +469,101 @@ PHASE_AB_INDEXES = """
     CREATE INDEX IF NOT EXISTS idx_ee_track ON entry_exit_events(track_id);
 """
 
+# ======================================================================
+# Phase 59 -- desk / seat zone schema (additive)
+# ======================================================================
+# Desk/seat zones are a *context* layer on top of the spatial tracker and the
+# face-identity system.  A seat NEVER becomes an identity authority: it only
+# annotates which desk a spatial track currently occupies (contextual carry),
+# while identity continues to follow the face/appearance pipeline.
+SEAT_ZONES_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS seat_zones (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        zone_id              TEXT UNIQUE NOT NULL,
+        camera_id            TEXT NOT NULL,
+        name                 TEXT NOT NULL DEFAULT '',
+        polygon              TEXT NOT NULL,
+        enabled              INTEGER NOT NULL DEFAULT 1,
+        assigned_employee_id TEXT,
+        created_at           TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+"""
+
+SEAT_EVENTS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS seat_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp   TEXT NOT NULL,
+        date        TEXT,
+        event_type  TEXT NOT NULL,
+        camera_id   TEXT NOT NULL,
+        zone_id     TEXT NOT NULL,
+        track_id    TEXT,
+        employee_id TEXT,
+        details     TEXT,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+"""
+
+PHASE59_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_seat_events_date ON seat_events(date);
+CREATE INDEX IF NOT EXISTS idx_seat_events_zone ON seat_events(zone_id);
+CREATE INDEX IF NOT EXISTS idx_seat_events_cam ON seat_events(camera_id);
+CREATE INDEX IF NOT EXISTS idx_seat_zones_camera ON seat_zones(camera_id);
+"""
+
+# ----------------------------------------------------------------------
+# Phase 59 extension (2026-09-21) -- CHAIRS.
+# ----------------------------------------------------------------------
+# A chair is a *chair* within a desk/seat zone (e.g. ``A01-C1``).  It is
+# cached as spatial metadata so a later phase can decide whether the person
+# at the desk is seated.  A chair is CONTEXT ONLY, exactly like a seat zone:
+#
+#   * it never grants identity -- a chair designation never turns EMP002
+#     into EMP001 (identity stays face-confirmed only);
+#   * ``assigned_employee_id`` is a *preference hint* shown on the live
+#     state, never an identity label and never an AWAY/PHP decision;
+#   * an empty chair is just VACANT -- it is never "employee AWAY".
+#
+# It is intentional that there is no 1 desk == 1 chair rule: a desk may have
+# zero, one, or more chairs, and chairs are configured independently.
+# ----------------------------------------------------------------------
+CHAIRS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS chairs (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        chair_id             TEXT UNIQUE NOT NULL,
+        camera_id            TEXT NOT NULL,
+        zone_id              TEXT NOT NULL,
+        name                 TEXT NOT NULL DEFAULT '',
+        enabled              INTEGER NOT NULL DEFAULT 1,
+        assigned_employee_id TEXT,
+        created_at           TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+"""
+
+CHAIR_EVENTS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS chair_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp   TEXT NOT NULL,
+        date        TEXT,
+        event_type  TEXT NOT NULL,
+        camera_id   TEXT NOT NULL,
+        zone_id     TEXT NOT NULL,
+        chair_id    TEXT NOT NULL,
+        track_id    TEXT,
+        employee_id TEXT,
+        details     TEXT,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+"""
+
+PHASE59B_INDEXES = """
+    CREATE INDEX IF NOT EXISTS idx_chairs_cam ON chairs(camera_id);
+    CREATE INDEX IF NOT EXISTS idx_chairs_zone ON chairs(zone_id);
+    CREATE INDEX IF NOT EXISTS idx_chair_events_date ON chair_events(date);
+    CREATE INDEX IF NOT EXISTS idx_chair_events_zone ON chair_events(zone_id);
+    CREATE INDEX IF NOT EXISTS idx_chair_events_chair ON chair_events(chair_id);
+"""
+
 
 def _migrate_security_phase32(conn: sqlite3.Connection):
     """Add Phase 32 columns to existing Phase 31 tables when missing."""
@@ -482,11 +633,49 @@ def _migrate_phase_ab(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _migrate_phase59b(conn: sqlite3.Connection):
+    """Phase 59b additive column migration for the chair model + employee
+    display names.  ``CHARS_SCHEMA`` / ``CHAIR_EVENTS_SCHEMA`` / the phase59b
+    indexes are already applied by ``init_db``; this only ever adds columns."""
+    emp_cols = _table_columns(conn, "employees")
+    _add_col(conn, "employees", emp_cols, "display_name", "TEXT DEFAULT ''")
+
+    chair_cols = _table_columns(conn, "chairs")
+    _add_col(conn, "chairs", chair_cols, "label", "TEXT DEFAULT ''")
+    _add_col(conn, "chairs", chair_cols, "assigned_employee_id", "TEXT")
+
+    ev_cols = _table_columns(conn, "chair_events")
+    _add_col(conn, "chair_events", ev_cols, "date", "TEXT")
+    _add_col(conn, "chair_events", ev_cols, "details", "TEXT")
+
+    conn.commit()
+
+
 def _add_col(conn: sqlite3.Connection, table: str, cols: set[str],
              name: str, ddl: str) -> None:
     if name not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
         logger.info("Migrating %s: adding '%s' column.", table, name)
+
+
+def _migrate_phase61(conn: sqlite3.Connection):
+    """Phase 61 additive column migration for the persistent admin camera
+    store.  The table itself is created by ``init_db``; this only ever adds
+    missing columns on legacy databases so the store never has to guess."""
+    cam_cols = _table_columns(conn, "admin_cameras")
+    _add_col(conn, "admin_cameras", cam_cols, "fps_target",
+             "REAL NOT NULL DEFAULT 0")
+    _add_col(conn, "admin_cameras", cam_cols, "reconnect_base",
+             "REAL NOT NULL DEFAULT 2.0")
+    _add_col(conn, "admin_cameras", cam_cols, "reconnect_max",
+             "REAL NOT NULL DEFAULT 30.0")
+    _add_col(conn, "admin_cameras", cam_cols, "reconnect_factor",
+             "REAL NOT NULL DEFAULT 2.5")
+    _add_col(conn, "admin_cameras", cam_cols, "created_at",
+             "TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))")
+    _add_col(conn, "admin_cameras", cam_cols, "updated_at",
+             "TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))")
+    conn.commit()
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -577,6 +766,21 @@ def init_db(conn: sqlite3.Connection):
     conn.executescript(ENTRY_EXIT_EVENTS_SCHEMA)
     conn.executescript(PHASE_AB_INDEXES)
     _migrate_phase_ab(conn)
+    # Phase 59 -- desk/seat zone schema (additive; never removes existing).
+    conn.executescript(SEAT_ZONES_SCHEMA)
+    conn.executescript(SEAT_EVENTS_SCHEMA)
+    conn.executescript(PHASE59_INDEXES)
+    # Phase 59 extension -- chair model + chair-event log (additive).
+    conn.executescript(CHAIRS_SCHEMA)
+    conn.executescript(CHAIR_EVENTS_SCHEMA)
+    conn.executescript(PHASE59B_INDEXES)
+    _migrate_phase59b(conn)
+    # Phase 61 -- persistent admin camera management (additive).
+    conn.executescript(ADMIN_CAMERAS_SCHEMA)
+    conn.executescript(CAMERA_APPLY_STATE_SCHEMA)
+    _migrate_phase61(conn)
+    # Phase 62 -- centralized admin settings (additive, in the existing DB).
+    conn.executescript(SETTINGS_SCHEMA)
     conn.commit()
     logger.info("Database schema verified/migrated.")
 
@@ -633,6 +837,7 @@ def upsert_employee(
     designation: str | None = None,
     active: bool = True,
     enrolled: bool | None = None,
+    display_name: str | None = None,
 ) -> bool:
     """Insert or update an employee.  Returns True on insert, False on update.
 
@@ -648,9 +853,16 @@ def upsert_employee(
     if existing:
         sets = ["active = ?", "updated_at = datetime('now', 'localtime')"]
         params: list = [1 if active else 0]
+        # Configurable display label is a pure admin convenience.  ``name``
+        # stays authoritative face metadata; display_name never changes
+        # employee_id and never gives anyone identity.
         for col, val in (("name", name), ("department", department),
-                         ("designation", designation)):
-            if val is not None:
+                         ("designation", designation),
+                         ("display_name", display_name)):
+            if val is not None and not (col == "display_name" and not val):
+                _add_col(conn, "employees",
+                         _table_columns(conn, "employees"),
+                         col, "TEXT DEFAULT ''")
                 sets.append(f"{col} = ?")
                 params.append(val)
         params.append(employee_id)
@@ -665,14 +877,22 @@ def upsert_employee(
             )
         conn.commit()
         return False
+# Make sure the display-name column exists before the INSERT writes it
+    # (the UPDATE path migrates lazily; the INSERT path must not drop a
+    # first-time display_name on legacy schemas).
+    _add_col(conn, "employees",
+             _table_columns(conn, "employees"),
+             "display_name", "TEXT DEFAULT ''")
     conn.execute(
         """
         INSERT INTO employees
-            (employee_id, name, department, designation, active, enrolled)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (employee_id, name, department, designation, active, enrolled,
+             display_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (employee_id, name or "", department or "", designation or "",
-         1 if active else 0, 1 if (enrolled if enrolled is not None else False) else 0),
+         1 if active else 0, 1 if (enrolled if enrolled is not None else False) else 0,
+         display_name or ""),
     )
     conn.commit()
     return True
@@ -693,6 +913,55 @@ def set_employee_active(conn: sqlite3.Connection, employee_id: str, active: bool
         (1 if active else 0, employee_id),
     )
     conn.commit()
+
+
+def set_employee_display_name(conn: sqlite3.Connection,
+                              employee_id: str, display_name: str | None) -> None:
+    """Update the presentation-only display label of an employee.
+
+    Explicitly does NOT touch ``employee_id`` (the stable canonical identity),
+    so historical event/productivity/security/face ownership stays intact.
+    ``None``/empty clears the label back to '' (the ``name`` column is never
+    implied to be the display label).
+    """
+    if not employee_id:
+        return
+    conn.execute(
+        "UPDATE employees SET display_name = ?, "
+        "updated_at = datetime('now', 'localtime') WHERE employee_id = ?",
+        (str(display_name or ""), employee_id),
+    )
+    conn.commit()
+
+
+# ======================================================================
+# Centralized admin configuration (Phase 62) -- persisted settings
+# ======================================================================
+
+def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO settings (key, value, updated_at)
+        VALUES (?, ?, datetime('now', 'localtime'))
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        """,
+        (key, str(value or "")),
+    )
+    conn.commit()
+
+
+def list_settings(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT key, value, updated_at FROM settings ORDER BY key").fetchall()
+    return [{"key": r[0], "value": r[1], "updated_at": r[2]} for r in rows]
 
 
 def list_employees(conn: sqlite3.Connection, include_inactive: bool = True) -> list[dict]:
@@ -1125,6 +1394,274 @@ def delete_zone(conn: sqlite3.Connection, zone_name: str) -> None:
 
 
 # ----------------------------------------------------------------------
+# Phase 59 -- desk / seat zones
+# ----------------------------------------------------------------------
+
+def upsert_seat_zone(conn: sqlite3.Connection, zone: dict) -> None:
+    """Insert or update one desk/seat zone (``zone_id`` is the unique key)."""
+    conn.execute(
+        """
+        INSERT INTO seat_zones
+            (zone_id, camera_id, name, polygon, enabled, assigned_employee_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(zone_id) DO UPDATE SET
+            camera_id=excluded.camera_id,
+            name=excluded.name,
+            polygon=excluded.polygon,
+            enabled=excluded.enabled,
+            assigned_employee_id=excluded.assigned_employee_id
+        """,
+        (
+            zone.get("zone_id"), zone.get("camera_id"),
+            zone.get("name", ""), zone.get("polygon"),
+            int(bool(zone.get("enabled", True))),
+            zone.get("assigned_employee_id"),
+        ),
+    )
+    conn.commit()
+
+
+def list_seat_zones(conn: sqlite3.Connection, *, enabled_only: bool = False) -> list[dict]:
+    sql = "SELECT * FROM seat_zones"
+    if enabled_only:
+        sql += " WHERE enabled = 1"
+    sql += " ORDER BY camera_id, zone_id"
+    rows = conn.execute(sql).fetchall()
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(seat_zones)").fetchall()]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def get_seat_zone(conn: sqlite3.Connection, zone_id: str) -> dict | None:
+    rows = conn.execute(
+        "SELECT * FROM seat_zones WHERE zone_id = ?", (zone_id,)
+    ).fetchall()
+    if not rows:
+        return None
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(seat_zones)").fetchall()]
+    return dict(zip(cols, rows[0]))
+
+
+def delete_seat_zone(conn: sqlite3.Connection, zone_id: str) -> None:
+    conn.execute("DELETE FROM seat_zones WHERE zone_id = ?", (zone_id,))
+    conn.commit()
+
+
+def insert_seat_event(conn: sqlite3.Connection, ev: dict) -> int:
+    """Persist one desk/seat observation event; returns the new row id.
+
+    ``ev`` is sanitized by the caller (``src.seat_zones``): only IDs and
+    neutral event types -- never raw embeddings, face crops or credentials.
+    """
+    ts = ev.get("timestamp", "")
+    cur = conn.execute(
+        """
+        INSERT INTO seat_events
+            (timestamp, date, event_type, camera_id, zone_id, track_id,
+             employee_id, details)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            ts,
+            ts[:10] if ts else None,
+            ev.get("event_type"),
+            ev.get("camera_id"),
+            ev.get("zone_id"),
+            ev.get("track_id"),
+            ev.get("employee_id"),
+            ev.get("details"),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_seat_events(conn: sqlite3.Connection, *, day: str | None = None,
+                     event_type: str | None = None, zone_id: str | None = None,
+                     camera_id: str | None = None, employee_id: str | None = None,
+                     limit: int = 500) -> list[dict]:
+    clauses: list[str] = []
+    params: list = []
+    if day:
+        clauses.append("date = ?")
+        params.append(day)
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(event_type)
+    if zone_id:
+        clauses.append("zone_id = ?")
+        params.append(zone_id)
+    if camera_id:
+        clauses.append("camera_id = ?")
+        params.append(camera_id)
+    if employee_id:
+        clauses.append("employee_id = ?")
+        params.append(employee_id)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = (
+        "SELECT * FROM seat_events " + where +
+        " ORDER BY timestamp DESC LIMIT ?"
+    )
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(seat_events)").fetchall()]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+# ----------------------------------------------------------------------
+# Phase 59b -- chairs (desk <> chair <> employee context-only binding)
+# ----------------------------------------------------------------------
+# Chairs are CONTEXT ONLY.  They never act as an identity authority, so
+# none of the helpers here assign identity -- the engine decides.  These
+# only persist *configuration* (name/label/enabled/assigned_employee_id) and
+# *observations* (chair_events).  assigned_employee_id is a display/home-seat
+# binder; it must NEVER be used to relabel a face.
+
+def upsert_chair(conn: sqlite3.Connection, chair: dict) -> None:
+    """Insert or update one chair (``chair_id`` is the unique key)."""
+    conn.execute(
+        """
+        INSERT INTO chairs
+            (chair_id, camera_id, zone_id, name, label, enabled,
+             assigned_employee_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chair_id) DO UPDATE SET
+            camera_id=excluded.camera_id,
+            zone_id=excluded.zone_id,
+            name=excluded.name,
+            label=excluded.label,
+            enabled=excluded.enabled,
+            assigned_employee_id=excluded.assigned_employee_id
+        """,
+        (
+            chair.get("chair_id"),
+            chair.get("camera_id"),
+            chair.get("zone_id"),
+            chair.get("name", ""),
+            chair.get("label", ""),
+            int(bool(chair.get("enabled", True))),
+            chair.get("assigned_employee_id"),
+        ),
+    )
+    conn.commit()
+
+
+def list_chairs(conn: sqlite3.Connection, *, enabled_only: bool = False,
+                zone_id: str | None = None,
+                camera_id: str | None = None) -> list[dict]:
+    clauses: list[str] = []
+    params: list = []
+    if enabled_only:
+        clauses.append("enabled = 1")
+    if zone_id:
+        clauses.append("zone_id = ?")
+        params.append(zone_id)
+    if camera_id:
+        clauses.append("camera_id = ?")
+        params.append(camera_id)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = "SELECT * FROM chairs " + where + " ORDER BY chair_id"
+    rows = conn.execute(sql, params).fetchall()
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(chairs)").fetchall()]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def get_chair(conn: sqlite3.Connection, chair_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM chairs WHERE chair_id = ?", (chair_id,)).fetchone()
+    if not row:
+        return None
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(chairs)").fetchall()]
+    return dict(zip(cols, row))
+
+
+def delete_chair(conn: sqlite3.Connection, chair_id: str) -> int:
+    cur = conn.execute("DELETE FROM chairs WHERE chair_id = ?", (chair_id,))
+    conn.commit()
+    return cur.rowcount
+
+
+def set_chair_enabled(conn: sqlite3.Connection, chair_id: str,
+                      enabled: bool) -> int:
+    cur = conn.execute(
+        "UPDATE chairs SET enabled = ? WHERE chair_id = ?",
+        (int(bool(enabled)), chair_id),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def list_chair_events(conn: sqlite3.Connection, *, day: str | None = None,
+                      event_type: str | None = None, zone_id: str | None = None,
+                       camera_id: str | None = None, chair_id: str | None = None,
+                       employee_id: str | None = None,
+                       limit: int = 500) -> list[dict]:
+    clauses: list[str] = []
+    params: list = []
+    if day:
+        clauses.append("date = ?")
+        params.append(day)
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(event_type)
+    if zone_id:
+        clauses.append("zone_id = ?")
+        params.append(zone_id)
+    if camera_id:
+        clauses.append("camera_id = ?")
+        params.append(camera_id)
+    if chair_id:
+        clauses.append("chair_id = ?")
+        params.append(chair_id)
+    if employee_id:
+        clauses.append("employee_id = ?")
+        params.append(employee_id)
+    if limit > 0:
+        clauses.append("id IN (SELECT id FROM chair_events ORDER BY timestamp DESC LIMIT ?)")  # noqa: E501
+        params.append(limit)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (
+            "SELECT * FROM chair_events " + where +
+            " ORDER BY timestamp DESC"
+        )
+    else:
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (
+            "SELECT * FROM chair_events " + where +
+            " ORDER BY timestamp DESC"
+        )
+    rows = conn.execute(sql, params).fetchall()
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(chair_events)").fetchall()]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def insert_chair_event(conn: sqlite3.Connection, ts: str, event_type: str,
+                       camera_id: str, zone_id: str,
+                       chair_id: str, *, track_id: str | None = None,
+                       employee_id: str | None = None,
+                       details: str | None = None) -> int:
+    """Record a chair observation.  ``employee_id`` is context-only metadata,
+    never a relabel operation."""
+    rows = conn.execute(
+        "INSERT INTO chair_events"
+        " (timestamp, date, event_type, camera_id, zone_id, chair_id,"
+        "  track_id, employee_id, details)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            ts,
+            ts[:10] if ts else None,
+            event_type,
+            camera_id,
+            zone_id,
+            chair_id,
+            track_id,
+            employee_id,
+            details,
+        ),
+    )
+    conn.commit()
+    return int(rows.lastrowid)
+
+
+# ----------------------------------------------------------------------
 # Evidence files
 # ----------------------------------------------------------------------
 
@@ -1308,6 +1845,82 @@ def set_camera_enabled(conn, camera_id: str, enabled: bool) -> None:
         (int(bool(enabled)), camera_id),
     )
     conn.commit()
+
+
+# ----------------------------------------------------------------------
+# Phase 61 -- Admin camera apply-state handshake
+# ----------------------------------------------------------------------
+
+def get_camera_apply_state(conn) -> dict | None:
+    rows = conn.execute(
+        "SELECT * FROM camera_apply_state WHERE id = 1").fetchall()
+    if not rows:
+        return None
+    cols = [d[1] for d in conn.execute(
+        "PRAGMA table_info(camera_apply_state)").fetchall()]
+    return dict(zip(cols, rows[0]))
+
+
+def set_camera_apply_request(conn, revision: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO camera_apply_state
+            (id, requested_revision, requested_at)
+        VALUES (1, ?, datetime('now', 'localtime'))
+        ON CONFLICT(id) DO UPDATE SET
+            requested_revision=excluded.requested_revision,
+            requested_at=excluded.requested_at
+        """,
+        (revision or "",),
+    )
+    conn.commit()
+
+
+def set_camera_applied(conn, revision: str, detail: str = "") -> None:
+    conn.execute(
+        """
+        INSERT INTO camera_apply_state
+            (id, requested_revision, requested_at, applied_revision,
+             applied_at, detail)
+        VALUES (1, ?, COALESCE((SELECT requested_at FROM camera_apply_state
+                                WHERE id = 1), datetime('now', 'localtime')),
+                ?, datetime('now', 'localtime'), ?)
+        ON CONFLICT(id) DO UPDATE SET
+            applied_revision=excluded.applied_revision,
+            applied_at=excluded.applied_at,
+            detail=excluded.detail
+        """,
+        (revision or "", revision or "", detail),
+    )
+    conn.commit()
+
+
+def has_camera_usage_history(conn, camera_id: str) -> bool:
+    """True when any *historical* record still references this camera.
+
+    Used to refuse a hard delete that would orphan security events, health
+    history, incident rows, seat zones or camera-topology edges.  Safe
+    disable/deactivate is always the recommended alternative.
+    """
+    probes = (
+        ("camera_health", "camera_id"),
+        ("security_events", "camera"),
+        ("incidents", "camera"),
+        ("seat_zones", "camera_id"),
+        ("camera_topology", "from_camera"),
+        ("camera_topology", "to_camera"),
+    )
+    for table, col in probes:
+        try:
+            row = conn.execute(
+                f"SELECT 1 FROM {table} WHERE {col} = ? LIMIT 1",
+                (camera_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            continue
+        if row:
+            return True
+    return False
 
 
 # ----------------------------------------------------------------------

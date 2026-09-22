@@ -66,6 +66,21 @@ AWAY = "AWAY"
 _VALID_STATES = {ACTIVE, ON_PHONE, AWAY}
 
 
+def _fsm_seconds(name: str, default: float) -> float:
+    """Read a live FSM knob from the ``config`` module (Phase 63).
+
+    Thresholds are read lazily -- never bound at import -- so an Admin
+    Control Center override applied by ``SettingsStore.apply_to_config()``
+    before this tracker is constructed is honoured.  Any read/parse failure
+    falls back to the env default captured at import.
+    """
+    try:
+        import config as _cfg
+        return float(getattr(_cfg, name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _iso(epoch: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
 
@@ -107,10 +122,25 @@ class EmployeeTracker:
     """
 
     def __init__(self, conn, employee_id: str,
-                 source: str = ""):
+                 source: str = "",
+                 *, away_after_sec: float | None = None,
+                 phone_after_sec: float | None = None,
+                 phone_gap_grace_sec: float | None = None):
         self._conn = conn
         self.employee_id = employee_id
         self.source = source or ""
+        # Phase 63: FSM thresholds resolve LIVE from ``config`` (admin
+        # override wins when explicitly passed) instead of import-time
+        # constants, so Admin → Thresholds takes real effect.
+        self._away_after_sec = \
+            float(away_after_sec) if away_after_sec is not None \
+            else _fsm_seconds("AWAY_AFTER_SEC", AWAY_AFTER_SEC)
+        self._phone_after_sec = \
+            float(phone_after_sec) if phone_after_sec is not None \
+            else _fsm_seconds("PHONE_AFTER_SEC", PHONE_AFTER_SEC)
+        self._phone_gap_grace_sec = \
+            float(phone_gap_grace_sec) if phone_gap_grace_sec is not None \
+            else _fsm_seconds("PHONE_GAP_GRACE_SEC", PHONE_GAP_GRACE_SEC)
         self._state: str | None = None
         self._candidate: str | None = None
         self._since: float = time.time()
@@ -176,7 +206,7 @@ class EmployeeTracker:
         # of whether any *other* person is still on screen.  A leaving
         # employee becomes AWAY even when colleagues remain visible.
         if raw == AWAY:
-            if self.last_seen is not None and now - self.last_seen >= AWAY_AFTER_SEC:
+            if self.last_seen is not None and now - self.last_seen >= self._away_after_sec:
                 if self._state != AWAY:
                     self._commit(AWAY, now)
                 self._candidate = AWAY
@@ -200,7 +230,7 @@ class EmployeeTracker:
                 self._phone_alerted = False
             else:
                 self._phone_last = now
-            if self._state != ON_PHONE and now - self._phone_since >= PHONE_AFTER_SEC:
+            if self._state != ON_PHONE and now - self._phone_since >= self._phone_after_sec:
                 # Crossed the continuous >5s threshold: commit ON_PHONE and
                 # emit exactly ONE event for this episode.
                 self._commit(ON_PHONE, now)
@@ -215,7 +245,7 @@ class EmployeeTracker:
             # state must stay ACTIVE (candidate is held, below).
         else:
             if self._phone_since is not None and self._phone_last is not None:
-                if now - self._phone_last >= PHONE_GAP_GRACE_SEC:
+                if now - self._phone_last >= self._phone_gap_grace_sec:
                     self._close_phone_run(now)
 
         # ----- Identity smoothing for non-absent raw states -----------------
@@ -276,7 +306,7 @@ class EmployeeTracker:
                 "status": "NEW",
                 "details": (
                     f"Continuous phone use crossed threshold "
-                    f"{PHONE_AFTER_SEC:g}s"
+                    f"{self._phone_after_sec:g}s"
                 ),
             },
         )
@@ -348,14 +378,25 @@ class MultiTracker:
     each tracker advances exactly once per cycle.
     """
 
-    def __init__(self, conn):
+    def __init__(self, conn, *, away_after_sec: float | None = None,
+                 phone_after_sec: float | None = None,
+                 phone_gap_grace_sec: float | None = None):
         self._conn = conn
         self._trackers: dict[str, EmployeeTracker] = {}
+        # Phase 63: optional admin-derived FSM thresholds forwarded to every
+        # tracker.  ``None`` keeps the env/live-config default.
+        self._away_after_sec = away_after_sec
+        self._phone_after_sec = phone_after_sec
+        self._phone_gap_grace_sec = phone_gap_grace_sec
         logger.info("MultiTracker initialised (dynamic face-based mode).")
 
     def _ensure_tracker(self, emp_id: str, source: str = "") -> EmployeeTracker:
         if emp_id not in self._trackers:
-            self._trackers[emp_id] = EmployeeTracker(self._conn, emp_id, source=source)
+            self._trackers[emp_id] = EmployeeTracker(
+                self._conn, emp_id, source=source,
+                away_after_sec=self._away_after_sec,
+                phone_after_sec=self._phone_after_sec,
+                phone_gap_grace_sec=self._phone_gap_grace_sec)
             logger.info("New tracker created for %s", emp_id)
         return self._trackers[emp_id]
 
@@ -594,6 +635,11 @@ class Track:
         self.unknown_label: int | None = None
         self.phone = False
         self.phone_since: float | None = None
+        # Phase 59 -- desk/seat zone context.  ``zone`` is the stable desk zone
+        # this track currently occupies (``camera_id:zone_id`` when inside a
+        # configured polygon, else None).  CONTEXT ONLY -- it never influences
+        # identity decisions (see src.seat_zones).
+        self.zone: str | None = None
         self.trajectory: deque[tuple[float, float]] = deque()
         self._adopt_frames = int(adopt_frames) if adopt_frames is not None \
             else IDENTITY_ADOPT_FRAMES
@@ -635,6 +681,20 @@ class Track:
         cx = ((x1 + x2) / 2.0) / self.frame_w
         cy = ((y1 + y2) / 2.0) / self.frame_h
         return round(max(0.0, min(1.0, cx)), 4), round(max(0.0, min(1.0, cy)), 4)
+
+    @property
+    def footpoint_normalized(self) -> tuple[float, float]:
+        """Bottom-centre of the bounding box, normalised to 0..1.
+
+        Phase 59 desk/seat zones evaluate a person's *standing point* (where
+        the person meets the desk/floor), not the visual box centre -- a seated
+        person's box centre can drift above their seat while the footpoint
+        stays anchored inside the desk zone.
+        """
+        x1, y1, x2, y2 = self.bbox
+        fx = ((x1 + x2) / 2.0) / self.frame_w
+        fy = y2 / self.frame_h
+        return round(max(0.0, min(1.0, fx)), 4), round(max(0.0, min(1.0, fy)), 4)
 
     def update(self, bbox: tuple, confidence: float, phone: bool, now: float,
                reid_emp: str | None = None, reid_score: float = 0.0,
@@ -1206,6 +1266,7 @@ class SpatialTracker:
                 "first_seen": round(t.first_seen, 2),
                 "last_seen": round(t.last_seen, 2),
                 "trajectory": [[float(x), float(y)] for x, y in t.trajectory],
+                "zone": t.zone,
             })
         return {
             "tracks": rows,

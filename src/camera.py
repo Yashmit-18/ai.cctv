@@ -27,6 +27,7 @@ from src.domain import (  # noqa: E402
     CAM_OFFLINE,
     CAM_ONLINE,
     CAM_RECONNECTING,
+    CameraSourceKind,
     redact_url,
 )
 
@@ -72,10 +73,23 @@ class VideoCapture:
         source=0,
         frame_skip: int = FRAME_SKIP,
         loop: bool = False,
+        kind: CameraSourceKind | None = None,
+        camera_id: str = "",
+        reconnect=(_RECONNECT_BASE, _RECONNECT_MAX, _RECONNECT_FACTOR),
     ):
         self.source = source
         self.frame_skip = frame_skip
         self.loop = loop
+        self.kind = kind or CameraSourceKind.infer(source)
+        if camera_id:
+            self.camera_id = camera_id
+        elif not isinstance(source, int):
+            self.camera_id = f"cam_{self.kind.value}"
+        else:
+            self.camera_id = str(source)
+        # Per-camera reconnect policy (bounded base->max with factor).
+        self._reconnect_cfg = tuple(reconnect) if reconnect else (
+            _RECONNECT_BASE, _RECONNECT_MAX, _RECONNECT_FACTOR)
         self._loop_count = 0
         self._frame = None
         self._last_frame_ts: float = 0.0
@@ -85,6 +99,9 @@ class VideoCapture:
         self._fps = 0.0
         self._fps_window_start: float = 0.0
         self._fps_window_frames = 0
+        # Resolution of the latest frame (0 until the first frame arrives).
+        self._frame_w = 0
+        self._frame_h = 0
         # Frozen-frame bookkeeping (A12): cheap content signature + streak.
         self._frame_sig = 0
         self._frozen_streak = 0
@@ -167,9 +184,16 @@ class VideoCapture:
             return 0
 
     def health_info(self) -> dict:
-        """Return a snapshot suitable for the dashboard/HUD."""
+        """Return a snapshot suitable for the dashboard/HUD.
+
+        Includes per-camera id/kind/resolution/reconnect telemetry while
+        keeping the source URL redacted (credentials are never exposed).
+        """
+        with self._lock:
+            w, h = self._frame_w, self._frame_h
         return {
-            "source": str(self.source),
+            "id": self.camera_id,
+            "source": redact_url(str(self.source)),
             "connected": self.is_connected,
             "health": self.health,
             "frames_read": self.frames_read,
@@ -177,6 +201,10 @@ class VideoCapture:
             "reconnects": self.reconnect_count,
             "last_frame": self.last_frame_timestamp,
             "frozen_streak": self._frozen_streak,
+            "kind": self.kind.value,
+            "width": w,
+            "height": h,
+            "resolution": f"{w}x{h}" if w and h else "",
         }
 
     # ------------------------------------------------------------------
@@ -203,8 +231,7 @@ class VideoCapture:
     # Internal: open / release
     # ------------------------------------------------------------------
     def _is_rtsp(self) -> bool:
-        src = str(self.source)
-        return src.startswith("rtsp://") or src.startswith("rtsp:")
+        return self.kind is CameraSourceKind.RTSP
 
     def _is_local(self) -> bool:
         """True for local devices (webcam index / numeric source).
@@ -213,10 +240,7 @@ class VideoCapture:
         per-read helper thread entirely (thread-per-read churn is a CPU
         waste on webcams).  RTSP keeps the timed path for network stalls.
         """
-        if self._is_rtsp():
-            return False
-        src = str(self.source).strip().lower()
-        return src in ("webcam", "local") or src.isdigit()
+        return self.kind is CameraSourceKind.LOCAL
 
     def _open_stream(self) -> bool:
         self._release_cap()
@@ -294,8 +318,17 @@ class VideoCapture:
     # ------------------------------------------------------------------
     # Reader thread
     # ------------------------------------------------------------------
+    def _reconnect_params(self) -> tuple[float, float, float]:
+        """(base, max, factor) for this camera's bounded reconnect policy."""
+        base, max_backoff, factor = self._reconnect_cfg
+        base = max(0.1, float(base) or _RECONNECT_BASE)
+        max_backoff = max(base, float(max_backoff) or _RECONNECT_MAX)
+        factor = max(1.01, float(factor) or _RECONNECT_FACTOR)
+        return base, max_backoff, factor
+
     def _reader(self):
-        backoff = _RECONNECT_BASE
+        base_backoff, max_backoff, factor = self._reconnect_params()
+        backoff = base_backoff
         frame_idx = 0
 
         if not self._open_stream():
@@ -320,11 +353,11 @@ class VideoCapture:
                 if not self._running:
                     break
                 if self._open_stream():
-                    backoff = _RECONNECT_BASE
+                    backoff = base_backoff
                     frame_idx = 0
                     continue
-                # Still failed -- increase backoff and retry.
-                backoff = min(backoff * _RECONNECT_FACTOR, _RECONNECT_MAX)
+                # Still failed -- increase backoff and retry (bounded at max).
+                backoff = min(backoff * factor, max_backoff)
                 with self._lock:
                     self._reconnect_count += 1
                 continue
@@ -338,7 +371,7 @@ class VideoCapture:
                 self._release_cap()
                 with self._lock:
                     self._reconnect_count += 1
-                backoff = min(backoff * _RECONNECT_FACTOR, _RECONNECT_MAX)
+                backoff = min(backoff * factor, max_backoff)
                 continue
 
             frame_idx += 1
@@ -351,6 +384,10 @@ class VideoCapture:
                 self._frame = frame
                 self._last_frame_ts = now
                 self._frames_read += 1
+                try:
+                    self._frame_h, self._frame_w = frame.shape[:2]
+                except Exception:
+                    pass
                 # A12 -- frozen-frame bookkeeping: same signature = same scene.
                 sig = self._frame_signature(frame)
                 if sig == self._frame_sig:

@@ -62,8 +62,10 @@ from config import (
 )
 from src.camera_manager import MultiCameraManager
 from src.database import (get_connection, init_db, insert_entry_exit_event,
-                          insert_motion_event, retention_cleanup)
+                          insert_motion_event, retention_cleanup,
+                          set_camera_applied)
 from src.domain import (  # noqa: F401 (re-exported for health constants)
+    CAM_DARK_BLANK_FRAME,
     CAM_FROZEN,
     CAM_LOW_FPS,
     CAM_NO_FRAME,
@@ -78,6 +80,7 @@ from src.motion import MotionDetector
 from src.notifier import send_daily_report
 from src.reporter import generate_daily_report
 from src.security_engine import SecurityEngine
+from src.seat_zones import SeatZoneStore, SeatZoneTracker, seed_seat_zones
 from src.tamper_monitor import TamperMonitor
 from src.tracker import ACTIVE, AWAY, MultiTracker, ON_PHONE, SpatialTracker
 
@@ -311,7 +314,9 @@ def _write_live_state(states: dict, telemetry: dict, cam_health: dict, fps: floa
                       ai_capabilities: dict | None = None,
                       phone_diag: dict | None = None,
                       timing: dict | None = None,
-                      reid: dict | None = None):
+                      reid: dict | None = None,
+                      seat: dict | None = None,
+                      phone_pass: dict | None = None):
     """Persist a small JSON snapshot for the dashboard live view.
 
     Best-effort: never raises, never blocks.  On failure the previous snapshot
@@ -386,6 +391,8 @@ def _write_live_state(states: dict, telemetry: dict, cam_health: dict, fps: floa
                 "phone_diag": phone_diag or {},
                 "pipeline_timing": timing or {},
                 "reid": reid or {},
+                "seat_zones": seat or {},
+                "phone_pass": phone_pass or {},
             },
         }
         os.makedirs(os.path.dirname(_LIVE_STATE_FILE), exist_ok=True)
@@ -562,7 +569,7 @@ def _usable_camera_frames(frames: dict, health: dict[str, dict]) -> dict:
             h["frame_mean"] = round(mean, 2)
         if mean is not None and mean < black_mean:
             h["usable"] = False
-            h["unusable_reason"] = "DARK_BLANK_FRAME"
+            h["unusable_reason"] = CAM_DARK_BLANK_FRAME
             continue
         h["usable"] = True
         usable[cid] = frame
@@ -1073,21 +1080,69 @@ def run(args: argparse.Namespace | None = None):
         cameras = CAMERAS
         camera_label = f"{len(CAMERAS)} cameras ({', '.join(CAMERAS)})"
 
+    # Phase 61: open the authoritative database BEFORE the camera pool so the
+    # runtime can be driven by persistent admin camera configuration when it
+    # has been configured.  With no admin configuration the Phase 58
+    # environment model is used verbatim (backward compatible).
+    conn = get_connection(DB_PATH)
+    init_db(conn)
+
+    # Phase 62: make the persisted Admin Control Center configuration authori-
+    # tative for this process (schedule knobs + FUTURE_* thresholds).  Additive
+    # and safe -- with an untouched settings table the existing env defaults
+    # are applied verbatim.
+    #
+    # Phase 63: a persisted away/phone threshold is fed into the LIVE FSM (via
+    # MultiTracker) -- untouched keys keep the env default exactly, so an
+    # operator who only tuned CCTV_AWAY_AFTER_SEC / CCTV_PHONE_AFTER_SEC is
+    # never surprised by the admin-panel defaults.
+    _p62_store = None
+    _fsm_away_sec = None
+    _fsm_phone_sec = None
+    try:
+        from src.admin_store import (KEY_AWAY, KEY_PHONE, SettingsStore)
+        _p62_store = SettingsStore(conn)
+        _p62_store.apply_to_config()
+        _p62_keys = set(_p62_store.keys_set())
+        if _p62_keys & {KEY_AWAY, KEY_PHONE}:
+            _s = _p62_store.get()
+            _fsm_away_sec = _s.away_seconds if KEY_AWAY in _p62_keys else None
+            _fsm_phone_sec = _s.phone_seconds if KEY_PHONE in _p62_keys else None
+    except Exception as exc:  # pragma: no cover - defensive startup guard
+        logger.warning("Admin settings not applied; using env defaults: %s",
+                       exc)
+
+    runtime_cfg = config.CAMERA_CONFIGS if not is_local else None
+    reconcile_runtime = None
+    if not is_local:
+        from src.camera_store import (CameraStore, reconcile_runtime,
+                                      runtime_configs)
+        cam_store = CameraStore(conn)
+        if cam_store.list():
+            runtime_cfg = runtime_configs(conn)
+            cameras = {cid: cfg.url for cid, cfg in runtime_cfg.items()}
+            camera_label = (f"{len(cameras)} cameras "
+                            f"({', '.join(cameras)}) [admin-configured]")
+            set_camera_applied(conn, cam_store.revision(), "startup")
+
     logger.info("Headless=%s | Device=%s | Batch=%d | %s",
                 args.headless, resolved_device, batch_size, camera_label)
 
-    cams = MultiCameraManager(cameras=cameras, max_batch=batch_size).start()
+    cams = MultiCameraManager(
+        cameras=cameras,
+        configs=runtime_cfg,
+        max_batch=batch_size,
+    ).start()
     if is_local and STARTUP_FRAME_WAIT_SEC > 0:
         if not _wait_for_initial_frames(cams, STARTUP_FRAME_WAIT_SEC):
             cams.stop()
             logger.error(_local_source_message(args.source))
             print(_local_source_message(args.source))
             sys.exit(3)
-    conn = get_connection(DB_PATH)
-    init_db(conn)
     _maybe_run_retention(conn)   # opt-in; applies once per day (see env)
     _reconcile_eod_state()        # Phase 54 M07 -- report/EOD continuity log
-    tracker = MultiTracker(conn)
+    tracker = MultiTracker(conn, away_after_sec=_fsm_away_sec,
+                           phone_after_sec=_fsm_phone_sec)
 
     # -- Phase A: spatial person tracking (A5/A6), motion (A8), entry/exit
     # (A10).  Strictly additive layers over the detector's per-person entries;
@@ -1108,6 +1163,26 @@ def run(args: argparse.Namespace | None = None):
         lines=load_lines(config.ENTRY_EXIT_LINES_FILE),
         debounce_sec=config.ENTRY_EXIT_DEBOUNCE_SEC,
     )
+
+    # -- Phase 59: desk/seat zone tracking -------------------------------
+    # Seat zones describe *where* a person is (desk context).  They are a
+    # strictly additive, CONTEXT-ONLY layer: they never change identity, never
+    # change employee FSM state, and a camera outage freezes its zones rather
+    # than fabricating vacancy/employee AWAY.  Stores start empty unless a
+    # seat_zones.json seed exists (configurable office layout).
+    seat_store = SeatZoneStore(conn)
+    seat_seeded = seed_seat_zones(conn, seat_store, config.SEAT_ZONES_FILE)
+    seat = SeatZoneTracker(
+        conn=conn,
+        store=seat_store,
+        active_cameras=set(cameras.keys()),
+        confirm_frames=config.SEAT_ZONE_CONFIRM_FRAMES,
+        clear_frames=config.SEAT_ZONE_CLEAR_FRAMES,
+        event_cooldown_sec=config.SEAT_EVENT_COOLDOWN_SEC,
+    )
+    if seat_seeded:
+        logger.info("Desk/seat zone tracking enabled (%d zone(s) seeded).",
+                    len(seat.zones))
 
     # A13 -- camera selection telemetry (honest: config mode + resolved input).
     if is_local:
@@ -1214,6 +1289,24 @@ def run(args: argparse.Namespace | None = None):
     if use_gui:
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
+    # Phase 61: throttled runtime apply of admin camera configuration.  The
+    # dashboard saves into `admin_cameras`; this tick picks changes up within
+    # a couple of seconds without restarting the daemon.
+    _CAM_APPLY_INTERVAL = 2.0
+    _last_cam_apply_check = [0.0]
+
+    def _maybe_apply_cameras(now_ts: float, cam_conn, cams_mgr):
+        if reconcile_runtime is None:
+            return
+        if now_ts - _last_cam_apply_check[0] < _CAM_APPLY_INTERVAL:
+            return
+        _last_cam_apply_check[0] = now_ts
+        try:
+            reconcile_runtime(cam_conn, cams_mgr)
+        except Exception:
+            logger.exception("Camera configuration apply failed (safe; "
+                             "existing cameras keep running).")
+
     # SecurityEngine and AuditLog are created above (lines 663/667) and must be
     # retained for the whole run. Phase 35: removed the erroneous `= None`
     # overwrite that previously nulled the security engine and audit log, which
@@ -1223,6 +1316,7 @@ def run(args: argparse.Namespace | None = None):
             # Part F timing anchors (opt-in).  t_capture/t_detect/t_state track
             # the major stages; live-state seconds are measured around the write.
             t_total = time.time()
+            _maybe_apply_cameras(t_total, conn, cams)
             t_capture = t_total
             t_detect = t_capture
             t_state = t_detect
@@ -1282,7 +1376,7 @@ def run(args: argparse.Namespace | None = None):
                 if cid in usable_ids:
                     dark_frames[cid] = 0
                     continue
-                if h.get("unusable_reason") != "DARK_BLANK_FRAME":
+                if h.get("unusable_reason") != CAM_DARK_BLANK_FRAME:
                     continue
                 dark_frames[cid] = dark_frames.get(cid, 0) + 1
                 n = dark_frames[cid]
@@ -1339,6 +1433,7 @@ def run(args: argparse.Namespace | None = None):
                 # -- Phase A (spatial) runs FIRST so per-person claims can feed
                 # the employee FSM below.  Still strictly isolated: a failure
                 # here only costs this cycle's claims, never the pipeline.
+                tracks = []
                 try:
                     t_track0 = time.time()
                     spatial.process(detections)
@@ -1361,6 +1456,19 @@ def run(args: argparse.Namespace | None = None):
 
                 tracker.process_batch(detections, camera_online=camera_online)
                 t_track1 = time.time()
+
+                # -- Phase 59: desk/seat zone context (isolated) --------
+                # Zones use the spatial tracks only as *where* evidence -- a
+                # seat never becomes an identity authority and never touches
+                # the employee FSM.  Cameras without a usable frame freeze
+                # their zones (no fake vacancy / fake AWAY).  Any failure here
+                # is advisory and cannot degrade the live loop.
+                try:
+                    t_seat0 = time.time()
+                    seat.tick(tracks, usable_camera_ids=set(frames))
+                    t_seat1 = time.time()
+                except Exception as _seat:
+                    logger.warning("Seat zone tick skipped (isolated): %s", _seat)
 
                 # -- Phase A: motion + line crossings (advisory) ------------
                 # Strictly additive/advisory; isolated so a Phase A failure can
@@ -1503,11 +1611,15 @@ def run(args: argparse.Namespace | None = None):
                           and hasattr(detector, "diagnostics_snapshot")
                           else {"enabled": False})
             reid_payload = None
+            phone_pass_payload = None
             if detector is not None and hasattr(detector, "phase44_diagnostics"):
                 try:
-                    reid_payload = detector.phase44_diagnostics().get("reid")
+                    _p44 = detector.phase44_diagnostics()
+                    reid_payload = _p44.get("reid")
+                    phone_pass_payload = _p44.get("phone_pass")
                 except Exception:
                     reid_payload = None
+                    phone_pass_payload = None
 
             _write_live_state(
                 tracker.live_states(), telemetry,
@@ -1527,6 +1639,8 @@ def run(args: argparse.Namespace | None = None):
                 phone_diag=phone_diag,
                 timing=timing_ema,
                 reid=reid_payload,
+                seat=seat.snapshot(),
+                phone_pass=phone_pass_payload,
             )
             t_live = time.time()
 
