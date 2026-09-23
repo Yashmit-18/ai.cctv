@@ -46,7 +46,6 @@ from dataclasses import dataclass, field
 from urllib.parse import quote, urlparse
 
 from src import database as db
-from src.camera import VideoCapture
 from src.domain import CameraConfig, CameraSourceKind, redact_url
 
 logger = logging.getLogger("cctv.camera_store")
@@ -523,6 +522,35 @@ def runtime_configs(conn, *, env_configs: dict | None = None) -> dict[str, Camer
 
 
 # ----------------------------------------------------------------------
+# Camera capture runtime boundary (Phase 65 -- cloud-safe lazy import)
+# ----------------------------------------------------------------------
+
+_RUNTIME_UNAVAILABLE = "RUNTIME_UNAVAILABLE"
+
+
+def load_camera_runtime():
+    """Return ``(VideoCapture, None)`` or ``(None, error_str)``.
+
+    The OpenCV capture runtime is a *local/daemon* dependency.  Camera
+    *configuration* (records, validation, apply handshake, resolution) never
+    needs it, so this module must never import ``src.camera`` at import time.
+    ``test_camera_connection`` loads it lazily so the dashboard can keep
+    offering full camera management even when OpenCV cannot be imported in the
+    current deployment environment (e.g. Streamlit Cloud where a GUI OpenCV
+    build is missing ``libGL``).
+    """
+    try:
+        from src.camera import VideoCapture
+        return VideoCapture, None
+    except ImportError as exc:  # pragma: no cover - env-dependent
+        logger.warning("Camera capture runtime unavailable: %s", exc)
+        return None, str(exc) or "OpenCV capture runtime could not be imported"
+    except Exception as exc:  # pragma: no cover - defensive, never crash UI
+        logger.warning("Camera capture runtime failed to load: %s", exc)
+        return None, str(exc) or "OpenCV capture runtime failed to load"
+
+
+# ----------------------------------------------------------------------
 # Test Connection (diagnostic only -- never persists anything)
 # ----------------------------------------------------------------------
 
@@ -535,6 +563,10 @@ def test_camera_connection(url="", *, kind=None, username="", password="",
     telemetry and always releases the capture in ``finally``.  The camera is
     NOT registered anywhere just because the test succeeded.  Without physical
     hardware this honestly reports ``ok=False`` with a sanitized reason.
+
+    When the OpenCV capture runtime itself cannot be imported in this
+    deployment environment, it reports an explicit ``RUNTIME_UNAVAILABLE``
+    state (never a crash and never a fake "connection failed").
 
     The result dict never contains the password or a credential-bearing URL.
     """
@@ -551,6 +583,17 @@ def test_camera_connection(url="", *, kind=None, username="", password="",
             "url": redact_url(str(url or "")),
         }
 
+    VideoCapture, runtime_error = load_camera_runtime()
+    if VideoCapture is None:
+        return {
+            "ok": False, "connected": False, "health": _RUNTIME_UNAVAILABLE,
+            "resolution": "", "width": 0, "height": 0, "fps": 0.0,
+            "frames_read": 0, "reconnects": 0, "elapsed": 0.0,
+            "error": ("camera runtime unavailable in this deployment "
+                      f"environment: {runtime_error}"),
+            "url": redact_url(str(url or "")),
+        }
+
     if kind_enum is CameraSourceKind.RTSP:
         source = compose_rtsp_url(str(url or ""), username, password)
     elif kind_enum is CameraSourceKind.LOCAL and not str(url or "").strip():
@@ -563,35 +606,42 @@ def test_camera_connection(url="", *, kind=None, username="", password="",
     start = time.monotonic()
     connected = False
     info: dict = {}
+    start_error = ""
     try:
         deadline = start + max(0.1, float(timeout))
-        cap.start()
-        while time.monotonic() < deadline:
-            info = cap.health_info()
-            if info.get("connected"):
-                connected = True
-                break
-            time.sleep(0.05)
+        try:
+            cap.start()
+        except Exception as exc:  # backend refused to open; never crash the probe
+            logger.warning("Test probe could not open source: %s", type(exc).__name__)
+            start_error = (f"capture backend failed to open: {type(exc).__name__}")
+        else:
+            while time.monotonic() < deadline:
+                info = cap.health_info()
+                if info.get("connected"):
+                    connected = True
+                    break
+                time.sleep(0.05)
     finally:
         try:
-            if not info:
+            if not info and not start_error:
                 info = cap.health_info()
             cap.stop()
         except Exception:  # pragma: no cover - release must always proceed
             logger.debug("Test probe teardown failed.", exc_info=True)
 
     if not connected:
+        err = (start_error or "connection unavailable: source not reachable "
+               "(and no physical camera is attached in this environment)")
         return {
             "ok": False, "connected": False,
-            "health": info.get("health") or "OFFLINE",
+            "health": (info.get("health") or "OFFLINE"),
             "resolution": info.get("resolution") or "",
             "width": info.get("width") or 0, "height": info.get("height") or 0,
             "fps": round(info.get("fps") or 0.0, 2),
             "frames_read": info.get("frames_read") or 0,
             "reconnects": info.get("reconnects") or 0,
             "elapsed": round(time.monotonic() - start, 2),
-            "error": ("connection unavailable: source not reachable (and no "
-                      "physical camera is attached in this environment)"),
+            "error": err,
             "url": redact_url(str(source)),
         }
     return {

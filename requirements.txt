@@ -1,5 +1,4 @@
 # Runtime
-opencv-python-headless>=4.9
 ultralytics>=8.0
 torch>=2.0
 pandas>=2.0
@@ -19,3 +18,13 @@ plotly>=5.18
 # Optional (highly recommended): CPU-only PyTorch wheels are smaller.
 # Windows users can also install torch once separately:
 #   python -m pip install torch
+
+# OpenCV (HEADLESS) --- MUST be declared AFTER insightface and installed
+# LAST so it wins the single `cv2` package directory on Streamlit Cloud.
+# insightface's own `Requires-Dist: opencv-python` pulls the GUI build,
+# which needs libGL.so.1 that Cloud images do not ship; importing that cv2
+# crashes with an ImportError.  Installing opencv-python-headless last makes
+# the headless build overwrite the GUI one, so `import cv2` works on Cloud.
+# The dashboard runtime only ever uses headless-compatible cv2 APIs
+# (VideoCapture / RTSP / image ops - never imshow or GUI windows).
+opencv-python-headless>=4.9

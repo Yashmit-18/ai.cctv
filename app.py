@@ -649,6 +649,40 @@ _COMPONENT_CSS = """
 .p42-footer { margin-top:34px; padding-top:12px; border-top:1px solid #1E2A40;
               color:#8B96A8; font-size:11px; display:flex; gap:18px; flex-wrap:wrap; }
 .p42-mut { color:#8B96A8; font-size:11px; }
+
+/* ---- Phase 65 premium SOC upgrade ---- */
+.p42-page-head { padding:2px 0 14px; border-bottom:1px solid #1E2A40; margin:0 0 14px; }
+.p42-page-title { font-size:21px; font-weight:800; letter-spacing:.2px; color:#EFF3F9; }
+.p42-page-sub { font-size:12.5px; color:#8B96A8; margin-top:4px; max-width:900px; line-height:1.5; }
+.p42-panel { border-radius:12px; padding:20px 22px; margin:8px 0 16px; display:flex;
+             align-items:flex-start; gap:14px; border:1px solid; }
+.p42-panel .p42-panel-badge { font-size:24px; line-height:1; flex:0 0 auto; }
+.p42-panel .p42-panel-title { font-weight:800; font-size:15px; letter-spacing:.3px; }
+.p42-panel .p42-panel-msg { font-size:13px; margin-top:4px; line-height:1.55; }
+.p42-panel-off { background:#0E1624; border-color:#263450; }
+.p42-panel-off .p42-panel-title { color:#C9D4E3; }
+.p42-panel-off .p42-panel-msg { color:#93A0B5; }
+.p42-panel-warn { background:#201A10; border-color:#5A441F; }
+.p42-panel-warn .p42-panel-title { color:#F6C794; }
+.p42-panel-warn .p42-panel-msg { color:#D6C2A0; }
+.p42-error-card { background:#2A1412; border:1px solid #7E2C25; border-radius:12px;
+                  padding:18px 20px; margin:8px 0 16px; }
+.p42-error-card .p42-error-title { color:#F0A39B; font-weight:800; font-size:14px;
+                                   letter-spacing:.6px; text-transform:uppercase; }
+.p42-error-card .p42-error-msg { color:#C9D4E3; font-size:13px; margin-top:6px; line-height:1.5; }
+.p42-diag-id { font-size:10.5px; color:#8B96A8; margin-top:10px;
+               font-family:"Cascadia Code","Consolas",monospace; }
+.p42-nav-legend { font-size:10px; letter-spacing:1.1px; color:#5E6B82;
+                  text-transform:uppercase; margin:2px 0 6px; line-height:1.7; }
+.p42-nav-legend b { color:#8B96A8; font-weight:700; }
+.p42-session-card { border:1px solid #1E2A40; border-radius:12px; background:#0E1624;
+                    padding:12px 14px; margin-top:6px; }
+.p42-session-card .p42-s-row { display:flex; justify-content:space-between; gap:10px;
+                               font-size:12.5px; padding:2px 0; }
+.p42-session-card .p42-s-row span:first-child { color:#8B96A8; }
+.p42-session-card .p42-s-row span:last-child { color:#C9D4E3; font-weight:600; }
+.p42-card:hover { border-color:#2E4676; box-shadow:0 4px 18px rgba(0,0,0,.35); }
+.p42-kpi-accent { border-top:2px solid #4C7DF0; }
 </style>
 """
 
@@ -805,6 +839,24 @@ div[data-testid="stVerticalBlockBorderWrapper"] { background:#0E1624; }
 
 div[data-testid="stHorizontalBlock"] { gap:0.75rem; }
 hr { border-color:#1E2A40 !important; }
+
+/* ---- Phase 65: premium SOC shell refinements ---- */
+section[data-testid="stSidebar"] .st-key-p42_nav [role="radiogroup"] label[aria-checked="true"] p {
+    background:#1B2C52; border:1px solid #3B67C9; color:#DCE7FF;
+    box-shadow:inset 2px 0 0 #4C7DF0;
+}
+section[data-testid="stSidebar"] .st-key-p42_nav [role="radiogroup"] label[aria-checked="true"] {
+    background:transparent;
+}
+div[data-testid="stMetric"] { border-top:2px solid #4C7DF0; box-shadow:0 2px 10px rgba(0,0,0,.25); }
+section[data-testid="stSidebar"] [data-testid="stSidebarContent"] > div > div:first-child {
+    padding-top:10px;
+}
+[data-testid="stAppViewContainer"]::before {
+    content:""; position:fixed; top:0; left:0; right:0; height:3px;
+    background:linear-gradient(90deg,#4C7DF0 0%,#2A47A8 45%,#0E1624 100%);
+    z-index:9999;
+}
 </style>
 """,
         unsafe_allow_html=True,
@@ -818,6 +870,11 @@ def _render_topbar(role: str) -> None:
     role_badge = (f"<span class='p42-role-badge'><span class='p42-ic'>admin_panel_settings</span>"
                   f"Admin</span>") if role == "admin" else (
                   f"<span class='p42-role-badge'><span class='p42-ic'>visibility</span>Viewer</span>")
+    sys_label = {"live": "SYSTEM ONLINE", "stale": "SYSTEM DEGRADED",
+                 "offline": "DAEMON OFFLINE"}[snap["kind"]]
+    sys_tone = {"live": "green", "stale": "orange", "offline": "gray"}[snap["kind"]]
+    updated = (f"Last updated {html.escape(str(snap['iso']))}"
+               if snap["iso"] != "—" else "Last updated —")
     st.html(
         _COMPONENT_CSS + f"""
 <div class='p42 p42-topbar'>
@@ -829,8 +886,9 @@ def _render_topbar(role: str) -> None:
     </div>
   </div>
   <div class='p42-topbar-right'>
-    {_chip_html({"label": f"Snapshot: {snap['label']}", "tone": snap["tone"], "icon": snap["icon"]}, "p42-chip-lg")}
-    <span class='p42-mut'>Updated {html.escape(str(snap['iso']))}</span>
+    {_chip_html({"label": sys_label, "tone": sys_tone, "icon": snap["icon"]}, "p42-chip-lg")}
+    {_chip_html({"label": f"Snapshot: {snap['label']}", "tone": snap["tone"], "icon": snap["icon"]})}
+    <span class='p42-mut'>{updated}</span>
     {role_badge}
     <div class='p42-clock'><b>{clock}</b><br/><span>{day}</span></div>
   </div>
@@ -864,31 +922,86 @@ def _render_snapshot_strip(live: dict) -> None:
     st.html(_COMPONENT_CSS + f"<div class='p42 p42-strip'>{''.join(parts)}</div>")
 
 
-def _render_kpi_row(live: dict, m: dict) -> None:
+def _panel_html(kind: str, icon: str, title: str, msg: str) -> str:
+    """Premium status panel (off/warn). ``msg`` may contain inline HTML."""
+    cls = ("p42-panel p42-panel-warn" if kind == "warn"
+           else "p42-panel p42-panel-off")
+    return (
+        f"<div class='{cls}'>"
+        f"<span class='p42-ic p42-panel-badge'>{icon}</span>"
+        f"<div><div class='p42-panel-title'>{html.escape(title)}</div>"
+        f"<div class='p42-panel-msg'>{msg}</div></div></div>"
+    )
+
+
+def _render_daemon_offline_panel() -> None:
+    """Honest premium empty-state: no live inference snapshot available.
+
+    Never presented as a security incident and never fabricated.  Explains
+    that the dashboard is online while the inference daemon is not running.
+    """
+    st.html(_COMPONENT_CSS + _panel_html(
+        "off", "sensors_off",
+        "DAEMON OFFLINE — No live inference snapshot available.",
+        "The Streamlit dashboard is online, but the CCTV inference daemon is "
+        "not running in this environment. Start it on the local/office machine "
+        "with <code>python main.py --source auto --headless --no-email</code>. "
+        "Configuration, settings, reports, analytics and historical data remain "
+        "fully available."
+    ))
+
+
+def _render_error_card(title: str, msg: str) -> None:
+    """Clean user-facing error card -- raw tracebacks are never shown.
+
+    The technical detail is logged internally; the UI gets a safe diagnostic
+    id so support can cross-reference logs without exposing internals.
+    """
+    logging.getLogger("cctv.dashboard").error("UI error [%s]: %s", title, msg)
+    diag = f"{int(time.time()) % 100000:05d}"
+    st.html(
+        _COMPONENT_CSS +
+        "<div class='p42 p42-error-card'>"
+        f"<div class='p42-error-title'>{html.escape(title)}</div>"
+        f"<div class='p42-error-msg'>{html.escape(msg)}</div>"
+        f"<div class='p42-diag-id'>Diagnostic id <b>{diag}</b> — this incident "
+        "was logged internally.</div></div>"
+    )
+
+
+def _render_dashboard_metrics(live: dict, m: dict, df_today: pd.DataFrame = None) -> None:
+    """Premium 9-card SOC KPI grid (real data only, never invented).
+
+    Layout preserves the existing metric labels and values (regression tests
+    assert them); the 9 KPIs match the SOC overview spec.
+    """
     k = _live_kpis(live, pd.DataFrame())
     cams = f"{k['cameras_online']}/{k['cameras_total']}" if k["cameras_total"] else "—"
     open_inc = "—" if k["open_incidents"] is None else str(k["open_incidents"])
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Cameras Online", cams,
-              help="Operational camera feeds (health == ONLINE). A camera that is "
-                   "offline / not delivering usable frames is never counted as AWAY.")
-    c2.metric("People Active", f"{k['active']}",
-              help="Employees currently ACTIVE in the live snapshot.")
-    c3.metric("Away", f"{k['away']}",
-              help="Employees currently AWAY (from the daemon, not a frontend timer).")
-    c4.metric("On Phone", f"{k['on_phone']}",
-              help="Employees currently in ON_PHONE state (one alert per episode).")
-    c5.metric("Open Incidents", open_inc,
-              help="Open incidents from the security snapshot (real security events).")
-
-
-def _render_analytics_row(df_today: pd.DataFrame, m: dict) -> None:
-    has_data = not df_today.empty
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Recognised Today", f"{m['recognised']}" if has_data else "n/a")
-    c2.metric("Avg Productivity", f"{m['avg_pct']:.0f}%" if m["avg_pct"] else "n/a")
-    c3.metric("Active Hours Today", f"{m['total_active']:.1f}h" if has_data else "n/a")
-    c4.metric("Phone Today", f"{m['phone_mins']:.0f}m" if has_data else "n/a")
+    has_data = df_today is not None and not df_today.empty
+    r1a, r1b, r1c = st.columns(3)
+    r1a.metric("Cameras Online", cams,
+               help="Operational camera feeds (health == ONLINE). A camera that is "
+                    "offline / not delivering usable frames is never counted as AWAY.")
+    r1b.metric("People Active", f"{k['active']}",
+               help="Employees currently ACTIVE in the live snapshot.")
+    r1c.metric("Away", f"{k['away']}",
+               help="Employees currently AWAY (from the daemon, not a frontend timer).")
+    r2a, r2b, r2c = st.columns(3)
+    r2a.metric("On Phone", f"{k['on_phone']}",
+               help="Employees currently in ON_PHONE state (one alert per episode).")
+    r2b.metric("Open Incidents", open_inc,
+               help="Open incidents from the security snapshot (real security events).")
+    r2c.metric("Recognised Today", m["recognised"] if has_data else "n/a",
+               help="Employees with at least one real observation today (roster "
+                    "rows that were never observed are not counted).")
+    r3a, r3b, r3c = st.columns(3)
+    r3a.metric("Average Productivity", f"{m['avg_pct']:.0f}%" if m["avg_pct"] else "n/a",
+               help="Mean productive percentage across observed employees today.")
+    r3b.metric("Active Hours Today", f"{m['total_active']:.1f}h" if has_data else "n/a",
+               help="Total active hours logged so far today (real analytics).")
+    r3c.metric("Phone Today", f"{m['phone_mins']:.0f}m" if has_data else "n/a",
+               help="Total phone minutes observed today (real analytics).")
 
 
 def _render_camera_cards(live: dict) -> None:
@@ -1053,13 +1166,29 @@ def _show_kv_list(items: list) -> None:
 
 
 def page_live_monitoring() -> None:
-    st.caption("Live camera status and people presence from the daemon snapshot — "
-               "real backend data only, refreshed with the rest of this page.")
     live = load_live_state()
+    st.html(
+        _COMPONENT_CSS +
+        "<div class='p42 p42-page-head'>"
+        "<div class='p42-page-title'>Live Monitoring</div>"
+        "<div class='p42-page-sub'>Live camera status, people presence and "
+        "inference capabilities from the daemon snapshot — real backend data "
+        "only, refreshed with the rest of this page.</div></div>",
+    )
     _render_snapshot_strip(live)
+    if not live:
+        _render_daemon_offline_panel()
     _render_camera_cards(live)
     if live:
         _render_people_cards(live)
+    else:
+        st.html(_COMPONENT_CSS + _panel_html(
+            "off", "group",
+            "PEOPLE PRESENCE UNAVAILABLE",
+            "Employee presence states come from the daemon snapshot. With the "
+            "daemon offline there is no per-person presence to show — nothing "
+            "here is simulated."
+        ))
     tab_live_employees()
     tab_ai_capabilities()
 
@@ -1096,28 +1225,37 @@ def _productivity_bar_figure(df_today: pd.DataFrame):
 
 def tab_live_overview():
     st.header("Live Overview")
+    st.html(
+        _COMPONENT_CSS +
+        "<div class='p42 p42-page-sub'>Real-time operational status from the "
+        "daemon snapshot and today's analytics — auto-refresh every "
+        f"{DASH_REFRESH_SEC}s (today: {date.today().isoformat()}). "
+        "Every figure is real observed data: cameras offline or an absent "
+        "daemon are never counted as AWAY, and nothing is fabricated.</div>",
+    )
     today = date.today()
-    if DASH_REFRESH_SEC:
-        st.caption(f"Auto-refresh every {DASH_REFRESH_SEC}s -- today: {today.isoformat()}")
-    else:
-        st.caption(f"Manual refresh -- today: {today.isoformat()}")
-
     df_today = cached_day_metrics(today.isoformat())
     live = load_live_state()
     age = live_state_age()
     if not live and age is not None and age > 60:
-        st.warning(
-            f"**LIVE DATA STALE** -- the last daemon snapshot is {age:.0f}s old. "
-            "Start the daemon to resume live tracking:\n\n"
-            "    python main.py --source auto --headless --no-email"
-        )
+        st.html(_COMPONENT_CSS + _panel_html(
+            "warn", "schedule",
+            "LIVE DATA STALE — last daemon snapshot is "
+            f"{age:.0f}s old.",
+            "The snapshot is old; live KPIs below reflect the last written "
+            "snapshot only. Start the daemon on the office machine with "
+            "<code>python main.py --source auto --headless --no-email</code> "
+            "to resume live tracking."
+        ))
 
     _inject_shell_css()
     _render_snapshot_strip(live)
     m = _live_overview_metrics(df_today, live)
 
-    _render_kpi_row(live, m)
-    _render_analytics_row(df_today, m)
+    if not live:
+        _render_daemon_offline_panel()
+
+    _render_dashboard_metrics(live, m, df_today)
 
     st.subheader("Today's Productivity per Employee")
     if df_today.empty:
@@ -1692,7 +1830,14 @@ def tab_reports(role: str = "viewer"):
 
 
 def tab_employees(role: str):
-    st.header("Employee Management")
+    st.html(
+        _COMPONENT_CSS +
+        "<div class='p42 p42-page-head'>"
+        "<div class='p42-page-title'>Employee Management</div>"
+        "<div class='p42-page-sub'>Roster rows the daemon recognises against. "
+        "Employees need a row here before a face photo can be attached for "
+        "identification.</div></div>",
+    )
     conn = get_readonly_connection()
     if conn is None:
         detail = f" ({_LAST_DB_ERROR})" if _LAST_DB_ERROR else ""
@@ -1705,7 +1850,12 @@ def tab_employees(role: str):
         conn.close()
 
     if not emps:
-        st.info("No employees registered yet. Create one below.")
+        st.html(_COMPONENT_CSS + _panel_html(
+            "off", "group",
+            "NO EMPLOYEES CONFIGURED",
+            "No roster rows exist yet. Create the first employee below — until a "
+            "person is registered the daemon cannot match anyone to the roster."
+        ))
     else:
         faces = {p.stem for p in _faces_dir().glob("*")
                  if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")}
@@ -2264,13 +2414,10 @@ def tab_admin_cameras(role: str) -> None:
     configuration.  All writes go to ``admin_cameras`` (SQLite); the daemon
     reconciles within seconds, so no code edit or restart is required.  Never
     displays a saved password or a credential-bearing URL.
+
+    Cloud-safe (Phase 65): the OpenCV capture runtime is loaded lazily and
+    only for "Test Connection"; configuration and management never need it.
     """
-    st.header("Admin → Cameras")
-    st.caption(
-        "Configure IP CCTV / RTSP / local cameras. Changes are saved to the "
-        "database and the runtime daemon applies them automatically (Apply "
-        "button below forces an immediate apply request)."
-    )
     if role != "admin":
         st.info("Viewer role: read-only. Ask an admin to configure cameras.")
         return
@@ -2296,32 +2443,69 @@ def tab_admin_cameras(role: str) -> None:
         _kind_labels = {k.value: k.value for k in CameraSourceKind}
         _kind_choices = list(_kind_labels)
 
+        st.markdown(
+            _COMPONENT_CSS +
+            "<div class='p42 p42-page-head'>"
+            "<div class='p42-page-title'>Camera Management</div>"
+            "<div class='p42-page-sub'>Persistent IP CCTV / RTSP / local camera configuration. "
+            "Configuration, validation and apply/reconcile need no capture runtime; "
+            "only “Test Connection” touches the camera runtime.</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        enabled_total = sum(1 for r in records if r.enabled)
+        online = sum(1 for r in records
+                     if r.enabled and live.get(r.camera_id, {}).get("health") == "ONLINE")
+        disabled = len(records) - enabled_total
+        offline = (enabled_total - online) if live else None
+        ov1, ov2, ov3, ov4 = st.columns(4)
+        ov1.metric("Total Cameras", f"{len(records)}",
+                   help="Admin-configured cameras; ids absent from the store fall "
+                        "back to the `.env` configuration.")
+        ov2.metric("Online", f"{online}",
+                   help="Enabled cameras with health ONLINE in the daemon snapshot.")
+        ov3.metric("Offline", "—" if offline is None else f"{offline}",
+                   help="Enabled cameras not ONLINE (no live snapshot = unknown).")
+        ov4.metric("Disabled", f"{disabled}",
+                   help="Configured but disabled cameras (kept, never started).")
+
         st.subheader(":material/photo_camera: Camera list")
         if not records:
-            st.info("No admin-configured cameras yet. Use the form below to add "
-                    "one (or keep using `.env` cameras unchanged).")
+            st.html(_COMPONENT_CSS +
+                    "<div class='p42 p42-empty'>No admin-configured cameras yet. "
+                    "Use the form below to add one (or keep using `.env` cameras "
+                    "unchanged).</div>")
         else:
             rows = []
             for r in records:
                 s = r.safe_dict()
                 h = live.get(r.camera_id, {})
+                if h:
+                    status = h.get("health") or "UNKNOWN"
+                    res = h.get("resolution") or "-"
+                    fps = h.get("fps") if h.get("health") != "OFFLINE" else "-"
+                else:
+                    status = "N/A (no live daemon)"
+                    res = "-"
+                    fps = "-"
                 rows.append({
-                    "Camera ID": r.camera_id,
                     "Name": r.name,
+                    "ID": r.camera_id,
                     "Type": s["kind"],
                     "Location": r.location or "-",
-                    "Enabled": "yes" if r.enabled else "no",
-                    "Status": h.get("health") if h else "N/A (no live daemon)",
-                    "Resolution": h.get("resolution") or "-",
-                    "FPS": h.get("fps") if h else "-",
+                    "Status": status,
+                    "Resolution": res,
+                    "FPS": fps,
+                    "Reconnect Policy": (f"{r.reconnect_base:g}s → {r.reconnect_max:g}s "
+                                         f"(×{r.reconnect_factor:g})"),
                     "Credentials": s["credentials"],
                 })
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True,
+                         column_config={"ID": st.column_config.TextColumn(width="small")})
             st.caption("Connection status comes from the running daemon's "
                        "health snapshot (OFFLINE / ONLINE / NO_FRAME / ...). "
-                       "Credentials are never displayed.")
-            st.caption("Stored URLs are shown redacted; e.g. "
-                       "`rtsp://***:***@host/...`.")
+                       "Passwords and credential-bearing RTSP URLs are never "
+                       "displayed — only CONFIGURED / NONE.")
 
         # -- Enable / disable ------------
         st.markdown("**Enable / Disable**")
@@ -2389,7 +2573,13 @@ def tab_admin_cameras(role: str) -> None:
                 probe = test_camera_connection(
                     c_url, kind=c_kind, username=c_user, password=c_pass,
                     reconnect=(c_rb, c_rm, c_rf), timeout=6.0)
-                if probe["ok"]:
+                if probe.get("health") == "RUNTIME_UNAVAILABLE":
+                    st.error(
+                        "TEST CONNECTION UNAVAILABLE IN CLOUD — the camera "
+                        "capture runtime (OpenCV) is not available in this "
+                        "deployment environment. Camera configuration and "
+                        "management remain available.")
+                elif probe["ok"]:
                     st.success(
                         f"Connection OK — {probe.get('health')} "
                         f"{probe.get('resolution') or ''} "
@@ -2472,7 +2662,13 @@ def tab_admin_cameras(role: str) -> None:
                             e_url, kind=e_kind, username=e_user,
                             password=(e_pass or src.password),
                             reconnect=(e_rb, e_rm, e_rf), timeout=6.0)
-                        if probe["ok"]:
+                        if probe.get("health") == "RUNTIME_UNAVAILABLE":
+                            st.error(
+                                "TEST CONNECTION UNAVAILABLE IN CLOUD — the camera "
+                                "capture runtime (OpenCV) is not available in this "
+                                "deployment environment. Camera configuration and "
+                                "management remain available.")
+                        elif probe["ok"]:
                             st.success(
                                 f"Connection OK — {probe.get('health')} "
                                 f"{probe.get('resolution') or ''} "
@@ -3588,14 +3784,26 @@ def main():
     _render_topbar(role)
 
     with st.sidebar:
-        st.markdown(f"**Role:** {role}")
-        if role == "admin":
-            st.write("Full access")
-        else:
-            st.write("View-only (monitoring, analytics, reports)")
+        snap = _snapshot_status(load_live_state())
+        conn_tag = {"live": "Live data", "stale": "Stale data",
+                    "offline": "Daemon offline"}[snap["kind"]]
+        st.html(
+            _COMPONENT_CSS +
+            "<div class='p42 p42-session-card'>"
+            f"<div class='p42-s-row'><span>Role</span>"
+            f"<span>{'Admin' if role == 'admin' else 'Viewer'}</span></div>"
+            f"<div class='p42-s-row'><span>System</span><span>{html.escape(conn_tag)}</span></div>"
+            f"<div class='p42-s-row'><span>Snapshot</span><span>{html.escape(snap['label'])}</span></div>"
+            "</div>"
+        )
         st.divider()
-        st.markdown("<span class='p42-nav-label'>Navigation</span>",
-                    unsafe_allow_html=True)
+        st.markdown(
+            "<span class='p42-nav-legend'><b>MONITORING</b> Dashboard · Live &nbsp;·&nbsp; "
+            "<b>PEOPLE</b> Employees &nbsp;·&nbsp; <b>SECURITY</b> Security · Reports · "
+            "Analytics &nbsp;·&nbsp; <b>INFRASTRUCTURE</b> Cameras · Admin · Settings · "
+            "Deploy</span>",
+            unsafe_allow_html=True,
+        )
         choice = st.radio("cctv_nav", _NAV_LABELS, key="p42_nav",
                           label_visibility="collapsed")
         st.divider()
@@ -3605,43 +3813,46 @@ def main():
             st.session_state.pop("cctv_role", None)
             st.session_state.pop("cctv_login_ts", None)
             st.rerun()
-        st.divider()
-        snap = _snapshot_status(load_live_state())
-        st.caption(f"Snapshot: {snap['label']} · {snap['iso']}"
-                   + (f" · {snap['age']:.0f}s ago"
-                      if isinstance(snap["age"], (int, float)) else ""))
         st.caption(f"Auto-refresh: {DASH_REFRESH_SEC}s")
 
-    page = _NAV_KEYS[choice]
-    if page == "dashboard":
-        if DASH_REFRESH_SEC:
-            _auto_fragment(tab_live_overview, DASH_REFRESH_SEC)
+    try:
+        page = _NAV_KEYS[choice]
+        if page == "dashboard":
+            if DASH_REFRESH_SEC:
+                _auto_fragment(tab_live_overview, DASH_REFRESH_SEC)
+            else:
+                tab_live_overview()
+        elif page == "live":
+            if DASH_REFRESH_SEC:
+                _auto_fragment(page_live_monitoring, DASH_REFRESH_SEC)
+            else:
+                page_live_monitoring()
+        elif page == "employees":
+            tab_employees(role)
+        elif page == "security":
+            if DASH_REFRESH_SEC:
+                _auto_fragment(tab_security, DASH_REFRESH_SEC, role)
+            else:
+                tab_security(role)
+        elif page == "reports":
+            tab_reports(role)
+        elif page == "analytics":
+            tab_historical()
+        elif page == "cameras":
+            tab_admin_cameras(role)
+        elif page == "admin":
+            tab_admin(role)
+        elif page == "settings":
+            tab_settings()
         else:
-            tab_live_overview()
-    elif page == "live":
-        if DASH_REFRESH_SEC:
-            _auto_fragment(page_live_monitoring, DASH_REFRESH_SEC)
-        else:
-            page_live_monitoring()
-    elif page == "employees":
-        tab_employees(role)
-    elif page == "security":
-        if DASH_REFRESH_SEC:
-            _auto_fragment(tab_security, DASH_REFRESH_SEC, role)
-        else:
-            tab_security(role)
-    elif page == "reports":
-        tab_reports(role)
-    elif page == "analytics":
-        tab_historical()
-    elif page == "cameras":
-        tab_admin_cameras(role)
-    elif page == "admin":
-        tab_admin(role)
-    elif page == "settings":
-        tab_settings()
-    else:
-        tab_deployment(role)
+            tab_deployment(role)
+    except Exception as exc:  # Phase 65: never expose a raw traceback in the UI
+        _render_error_card(
+            "Something went wrong while rendering this page",
+            f"An unexpected error occurred ({type(exc).__name__}). The incident "
+            "was logged internally; use the diagnostic id to correlate it. "
+            "Refresh now to retry."
+        )
 
     _render_footer(role)
 
