@@ -1,6 +1,15 @@
+import os
 import sqlite3
 
 import pytest
+
+# Phase 64B: the dashboard's fail-closed default (CCTV_DASH_FAIL_CLOSED=1) is
+# now the secure production behavior -- missing credentials MUST NOT become an
+# open admin panel.  The test suite runs in the documented local-development
+# open mode instead: CCTV_DASH_AUTH=0.  setdefault keeps any CI/explicit value
+# authoritative.  This must be set BEFORE `config`/`app` are imported so every
+# module-level read picks it up.
+os.environ.setdefault("CCTV_DASH_AUTH", "0")
 
 from config import DB_PATH
 from src.database import get_connection, init_db

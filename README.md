@@ -520,14 +520,20 @@ CCTV_EOD_HOUR=19             # 0-23; empty/"none" disables scheduled reports
 
 ```dotenv
 CCTV_DASH_REFRESH=5            # live-tab auto-refresh interval (s)
-CCTV_DASH_AUTH=1               # 1 enables the login gate, 0 runs open (admin)
+CCTV_DASH_AUTH=1               # 1 = login gate, 0 = explicit open dev mode
+CCTV_DASH_FAIL_CLOSED=1        # default 1: no credentials configured -> access
+                               # is BLOCKED (never silently open as admin)
 CCTV_DASH_USER=admin
-CCTV_DASH_PASS=replace-me      # set a password to enable the login gate
+CCTV_DASH_PASS=replace-me      # set an admin password to enable login
 CCTV_DASH_VIEWER_PASS=replace-me   # read-only viewer role
 ```
 
-> No dashboard password configured ⇒ the dashboard runs **open (admin)**.
-> Always set `CCTV_DASH_PASS` in production and put it behind a VPN / reverse proxy.
+> Fail-closed (secure default, Phase 64B): with `CCTV_DASH_AUTH=1` and no
+> password configured the dashboard **denies all access** instead of opening an
+> admin panel. Configure `CCTV_DASH_PASS` (and optionally
+> `CCTV_DASH_VIEWER_PASS`) to log in. For trusted local development only, set
+> `CCTV_DASH_AUTH=0` explicitly to restore the open admin mode.
+> Always put the dashboard behind a VPN / reverse proxy.
 
 ### SMTP (report emailing)
 

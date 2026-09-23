@@ -24,6 +24,7 @@ import os
 import pickle
 import re
 import sqlite3
+import threading
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -81,6 +82,45 @@ st.set_page_config(
 # Read-only SQLite helpers (safe against background daemon writes)
 # ----------------------------------------------------------------------
 
+_LAST_DB_ERROR = ""
+# Serialises first-run schema bootstrap.  Streamlit Cloud runs each session in
+# its own thread, so two concurrent first loads could otherwise initialise the
+# same fresh database simultaneously and transiently fail on a busy lock.
+_DB_BOOTSTRAP_LOCK = threading.Lock()
+
+
+def _format_db_error(db_path: str, stage: str, exc: Exception) -> str:
+    path = Path(db_path)
+    return (
+        f"stage={stage}; exception={type(exc).__name__}: {exc}; "
+        f"database_path={path}; cwd={Path.cwd()}; "
+        f"parent_exists={path.parent.exists()}; file_exists={path.exists()}"
+    )
+
+
+def _probe_schema(db_file: Path) -> bool:
+    """Return True when the canonical app schema still needs to be created.
+
+    A missing file, a zero-byte file, or a file without the ``employees`` /
+    ``activity_logs`` tables all report True.  A readable, fully initialised
+    database reports False.  A file that exists but cannot be read (corrupt /
+    not a SQLite database) is surfaced as a ``sqlite3.DatabaseError`` so the
+    caller can report the real problem instead of silently hiding it.
+    """
+    if not db_file.exists():
+        return True
+    probe = sqlite3.connect(str(db_file), timeout=2)
+    try:
+        tables = {
+            row[0] for row in probe.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        return not {"employees", "activity_logs"} <= tables
+    finally:
+        probe.close()
+
+
 def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection | None:
     """Return a connection that is safe against the daemon's concurrent writes.
 
@@ -90,15 +130,51 @@ def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection | None
     skips the WAL and only reads the occasionally-checkpointed main file),
     which made live metrics disagree with :mod:`src.analytics`.  Query-only
     semantics still hard-block any write through this handle.
+
+    If the database file does not yet exist (fresh deployment / first launch),
+    create the parent directory and initialize the canonical SQLite schema once
+    before opening the read-only handle.  This keeps the dashboard from
+    displaying a spurious "Database unavailable." state on a newly booted
+    cloud instance while preserving the normal read-only access pattern.
     """
-    if not os.path.exists(db_path):
-        return None
+    global _LAST_DB_ERROR
+    _LAST_DB_ERROR = ""
+    db_file = Path(db_path)
     try:
-        conn = sqlite3.connect(db_path, check_same_thread=False, timeout=2)
+        needs_schema = _probe_schema(db_file)
+    except Exception as exc:
+        _LAST_DB_ERROR = _format_db_error(str(db_file), "probe", exc)
+        logging.getLogger("cctv.dashboard").warning(_LAST_DB_ERROR)
+        return None
+    if needs_schema:
+        with _DB_BOOTSTRAP_LOCK:
+            try:
+                needs_schema = _probe_schema(db_file)
+            except Exception as exc:
+                _LAST_DB_ERROR = _format_db_error(str(db_file), "probe", exc)
+                logging.getLogger("cctv.dashboard").warning(_LAST_DB_ERROR)
+                return None
+            if needs_schema:
+                try:
+                    from src import database as db
+                    conn = db.get_connection(str(db_file))
+                    try:
+                        db.init_db(conn)
+                    finally:
+                        conn.close()
+                except Exception as exc:
+                    _LAST_DB_ERROR = _format_db_error(
+                        str(db_file), "schema_init", exc)
+                    logging.getLogger("cctv.dashboard").warning(_LAST_DB_ERROR)
+                    return None
+    try:
+        conn = sqlite3.connect(str(db_file), check_same_thread=False, timeout=2)
         conn.execute("PRAGMA query_only=ON")
         conn.row_factory = sqlite3.Row
         return conn
-    except sqlite3.Error:
+    except Exception as exc:
+        _LAST_DB_ERROR = _format_db_error(str(db_file), "readonly_connect", exc)
+        logging.getLogger("cctv.dashboard").warning(_LAST_DB_ERROR)
         return None
 
 
@@ -1564,7 +1640,8 @@ def tab_employees(role: str):
     st.header("Employee Management")
     conn = get_readonly_connection()
     if conn is None:
-        st.error("Database unavailable.")
+        detail = f" ({_LAST_DB_ERROR})" if _LAST_DB_ERROR else ""
+        st.error(f"Database unavailable.{detail}")
         return
     try:
         store = EmployeeStore(conn, WORK_SCHEDULE)

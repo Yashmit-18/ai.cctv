@@ -24,6 +24,74 @@ from src import database as db
 
 
 # ----------------------------------------------------------------------
+# Phase 64B -- cloud hardening regression (SECURITY BLOCKER)
+# ----------------------------------------------------------------------
+# Before this phase `CCTV_DASH_FAIL_CLOSED` defaulted to "0", so a bare cloud
+# deployment with no dashboard passwords silently granted the `admin` role to
+# unauthenticated visitors.  The default is now fail-closed: missing
+# credentials never mean "admin".
+
+def test_config_fail_closed_default_is_secure():
+    """config default (no env override) must be fail-closed ON."""
+    import importlib
+
+    import config as _cfg
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.delenv("CCTV_DASH_FAIL_CLOSED", raising=False)
+        mp.delenv("CCTV_DASH_AUTH", raising=False)
+        importlib.reload(_cfg)
+        assert _cfg.DASH_AUTH_ENABLED is True
+        assert _cfg.DASH_FAIL_CLOSED is True
+    importlib.reload(_cfg)  # restore session environment state
+
+
+def test_missing_credentials_default_fail_closed_blocks(monkeypatch):
+    """64B: no admin/viewer credential + fail-closed => NOT admin."""
+    monkeypatch.setattr(app, "DASH_AUTH_ENABLED", True)   # production default
+    monkeypatch.setattr(app, "DASH_FAIL_CLOSED", True)    # hardened default
+    monkeypatch.setattr(app, "DASH_ADMIN_PASS", "")
+    monkeypatch.setattr(app, "DASH_VIEWER_PASS", "")
+    monkeypatch.setattr(app, "DASH_USERNAME", "admin")
+    assert app.do_auth() != "admin"
+    assert app.do_auth() == ""
+    assert app._authenticate("admin", "") == ""
+
+
+def test_correct_admin_credentials_grant_admin(monkeypatch):
+    """64B: only the configured admin username+password grants admin."""
+    monkeypatch.setattr(app, "DASH_ADMIN_PASS", "64b-admin-dummy")
+    monkeypatch.setattr(app, "DASH_VIEWER_PASS", "64b-viewer-dummy")
+    monkeypatch.setattr(app, "DASH_USERNAME", "admin")
+    assert app._authenticate("admin", "64b-admin-dummy") == "admin"
+
+
+def test_correct_viewer_credentials_grant_viewer(monkeypatch):
+    """64B: the shared viewer password grants read-only viewer."""
+    monkeypatch.setattr(app, "DASH_ADMIN_PASS", "64b-admin-dummy")
+    monkeypatch.setattr(app, "DASH_VIEWER_PASS", "64b-viewer-dummy")
+    assert app._authenticate("anyone", "64b-viewer-dummy") == "viewer"
+
+
+def test_incorrect_credentials_rejected(monkeypatch):
+    """64B: wrong user/password combinations never grant a role."""
+    monkeypatch.setattr(app, "DASH_ADMIN_PASS", "64b-admin-dummy")
+    monkeypatch.setattr(app, "DASH_VIEWER_PASS", "64b-viewer-dummy")
+    monkeypatch.setattr(app, "DASH_USERNAME", "admin")
+    assert app._authenticate("admin", "wrong") == ""
+    assert app._authenticate("nobody", "64b-admin-dummy") == ""
+    assert app._authenticate("", "") == ""
+
+
+def test_viewer_cannot_obtain_admin(monkeypatch):
+    """64B: a viewer password must never double as an admin password."""
+    monkeypatch.setattr(app, "DASH_ADMIN_PASS", "64b-admin-dummy")
+    monkeypatch.setattr(app, "DASH_VIEWER_PASS", "64b-viewer-dummy")
+    monkeypatch.setattr(app, "DASH_USERNAME", "admin")
+    assert app._authenticate("admin", "64b-viewer-dummy") != "admin"
+
+
+# ----------------------------------------------------------------------
 # H1 - fail-closed must block even when no password is configured
 # ----------------------------------------------------------------------
 

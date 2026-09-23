@@ -158,3 +158,88 @@ def test_get_readonly_connection_sees_wal_rows(tmp_path):
             )
     finally:
         writer.close()
+
+
+def test_get_readonly_connection_creates_missing_db(tmp_path):
+    """Dashboard should bootstrap the app DB on first load instead of
+    reporting 'Database unavailable.' for a brand-new deployment.
+    """
+    import sqlite3
+
+    import pytest
+
+    import src.database as sdb
+    from app import get_readonly_connection
+
+    db = tmp_path / "new-db" / "sessions.db"
+    assert not db.exists()
+
+    reader = get_readonly_connection(str(db))
+    try:
+        assert reader is not None
+        tables = reader.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        assert any(row[0] == "employees" for row in tables)
+        assert any(row[0] == "activity_logs" for row in tables)
+        with pytest.raises(sqlite3.DatabaseError):
+            reader.execute("INSERT INTO employees (employee_id, name) VALUES ('EMP001', 'Alice')")
+    finally:
+        reader.close()
+
+
+def test_get_readonly_connection_initializes_empty_db(tmp_path):
+    """An existing zero-byte SQLite file must also receive the app schema."""
+    from app import get_readonly_connection
+
+    db = tmp_path / "empty" / "sessions.db"
+    db.parent.mkdir()
+    db.touch()
+
+    reader = get_readonly_connection(str(db))
+    try:
+        assert reader is not None
+        tables = {
+            row[0] for row in reader.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert {"employees", "activity_logs"} <= tables
+    finally:
+        reader.close()
+
+
+def test_get_readonly_connection_concurrent_first_run(tmp_path):
+    """Concurrent first loads (Streamlit runs sessions in threads) must not
+    race on schema bootstrap: every caller gets a usable read-only handle.
+    Regression: an unsynchronized first-run could transiently fail with a
+    busy/locked error and surface 'Database unavailable.'.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import sqlite3
+
+    from app import _LAST_DB_ERROR, get_readonly_connection
+
+    db = tmp_path / "concurrent" / "sessions.db"
+    assert not db.exists()
+
+    def _open(_: int):
+        conn = get_readonly_connection(str(db))
+        assert conn is not None, f"worker failed: {_LAST_DB_ERROR}"
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM employees").fetchone()[0]
+            assert n == 0
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(_open, range(4)))
+
+    tables = {
+        row[0] for row in
+        ((sqlite3.connect(db))
+         .execute("SELECT name FROM sqlite_master WHERE type='table'"))
+    }
+    assert {"employees", "activity_logs"} <= tables

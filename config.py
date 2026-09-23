@@ -749,13 +749,15 @@ DASH_USERNAME = os.getenv("CCTV_DASH_USER", "admin")
 DASH_ADMIN_PASS = os.getenv("CCTV_DASH_PASS", "")   # empty disables auth
 DASH_VIEWER_PASS = os.getenv("CCTV_DASH_VIEWER_PASS", "")  # view-only role
 DASH_ROLE_VIEWER = "viewer"
-# Production fail-closed guard (Phase 39, B4).  When this is enabled ("1") and
-# dashboard auth is enabled but NO admin/viewer password is configured, the
-# dashboard refuses to grant access (fail closed) and the preflight check
-# reports a blocking FAIL.  This prevents an authenticated-by-intent deployment
-# from silently running fully open.  Local development may use
-# ``CCTV_DASH_AUTH=0`` for open mode or leave this flag off.
-DASH_FAIL_CLOSED = os.getenv("CCTV_DASH_FAIL_CLOSED", "0") == "1"
+# Production fail-closed guard (Phase 39, B4; hardened default in Phase 64B).
+# When this is enabled ("1", the secure default) and dashboard auth is enabled
+# but NO admin/viewer password is configured, the dashboard refuses to grant
+# access (fail closed) and the preflight check reports a blocking FAIL.  This
+# prevents a bare/cloud deployment from silently running fully open as admin.
+# Local development keeps working: explicit ``CCTV_DASH_PASS`` /
+# ``CCTV_DASH_VIEWER_PASS`` enable the normal login flow, and ``CCTV_DASH_AUTH=0``
+# re-enables the documented open dev mode on a trusted network.
+DASH_FAIL_CLOSED = os.getenv("CCTV_DASH_FAIL_CLOSED", "1") == "1"
 # Session expiry (Phase 39, B18).  After this many minutes a logged-in session
 # is invalidated and the user must sign in again.  A value <= 0 disables expiry
 # (keeps the previous persistent-session behavior for local development).
