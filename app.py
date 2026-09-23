@@ -459,13 +459,64 @@ def do_auth() -> str:
                 return st.session_state["cctv_role"]
         else:
             return st.session_state["cctv_role"]
-    st.markdown("### Login")
-    st.caption("Admin: full control (employees, enrollment). "
-               "Viewer: monitor, analytics and report downloads only.")
-    with st.form("login"):
-        user = st.text_input("Username")
-        pw = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Sign in")
+    _inject_shell_css()
+    col_left, col_right = st.columns([1.1, 1], gap="large")
+    with col_left:
+        st.html(
+            _COMPONENT_CSS +
+            "<div class='p66-hero'>"
+            "<div class='p66-hero-brand'><div class='p42-brand-mark'>"
+            "<span class='p42-ic'>security</span></div>"
+            "<div class='p66-hero-name'>AI CCTV Intelligence"
+            "<small>Security Operations Center</small></div></div>"
+            "<div class='p66-hero-tagline'>Smarter Surveillance. "
+            "<b>Safer Workplaces.</b></div>"
+            "<div class='p66-hero-sub'>A single operational view of your office "
+            "CCTV cameras, people presence and productivity analytics. The "
+            "dashboard streams from your on-premise CCTV daemon — real observed "
+            "data, never fabricated numbers.</div>"
+            "<div class='p66-feat'>"
+            "<div class='p66-feat-card'><div class='p66-feat-icon'>lock</div>"
+            "<div class='p66-feat-title'>Secure Access</div>"
+            "<div class='p66-feat-desc'>Role-based sign-in for administrators "
+            "and viewers with a session timeout and fail-closed protection.</div></div>"
+            "<div class='p66-feat-card'><div class='p66-feat-icon'>monitor_heart</div>"
+            "<div class='p66-feat-title'>Real-Time Intelligence</div>"
+            "<div class='p66-feat-desc'>Live presence, camera health and "
+            "incident feeds on a single SOC dashboard.</div></div>"
+            "<div class='p66-feat-card'><div class='p66-feat-icon'>shield</div>"
+            "<div class='p66-feat-title'>Enterprise Security</div>"
+            "<div class='p66-feat-desc'>Incident timeline, evidence mode and "
+            "investigation workbench for your security team.</div></div>"
+            "</div></div>"
+        )
+    with col_right:
+        st.html(
+            _COMPONENT_CSS +
+            "<div class='p66-login-wrap'><div class='p66-login-card'>"
+            "<div class='p66-login-title'>Welcome Back</div>"
+            "<div class='p66-login-sub'>Sign in to access your Security "
+            "Operations Center.</div>"
+            "<div class='p66-role-row'>"
+            "<div class='p66-role-item'><b>Admin</b>"
+            "<span>Full system control</span></div>"
+            "<div class='p66-role-item'><b>Viewer</b>"
+            "<span>Monitoring and reports access</span></div>"
+            "</div></div></div>"
+        )
+        viewer_requested = st.session_state.get("_p66_login_viewer", False)
+        with st.form("login"):
+            user = st.text_input("Username")
+            pw = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Sign In →", type="primary",
+                                           use_container_width=True)
+        if viewer_requested:
+            st.caption("Viewer sign-in: enter the viewer password below and "
+                       "click **Sign In →**. The username can be left blank.")
+        if st.button("Viewer Access", key="p66_viewer_access",
+                     use_container_width=True):
+            st.session_state["_p66_login_viewer"] = True
+            st.rerun()
     if submit:
         role = _authenticate(user, pw)
         if role:
@@ -683,6 +734,147 @@ _COMPONENT_CSS = """
 .p42-session-card .p42-s-row span:last-child { color:#C9D4E3; font-weight:600; }
 .p42-card:hover { border-color:#2E4676; box-shadow:0 4px 18px rgba(0,0,0,.35); }
 .p42-kpi-accent { border-top:2px solid #4C7DF0; }
+
+/* ---- Phase 66: data-state, landing & login ---- */
+.p66-status-card { border:1px solid #232F4A; border-radius:14px; background:#0E1624;
+                   padding:18px 20px; margin:8px 0 16px; }
+.p66-status-head { display:flex; align-items:center; justify-content:space-between;
+                   gap:12px; flex-wrap:wrap; }
+.p66-status-title { font-size:15px; font-weight:800; letter-spacing:.4px; color:#E6EDF7; }
+.p66-status-sub { color:#8B96A8; font-size:12.5px; margin-top:4px; max-width:760px; line-height:1.55; }
+.p66-status-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+                   gap:10px; margin-top:14px; }
+.p66-status-item { border:1px solid #1E2A40; border-radius:10px; padding:10px 12px;
+                   background:#0B1220; }
+.p66-status-item .p66-st-label { font-size:10px; letter-spacing:1px; text-transform:uppercase;
+                                 color:#8B96A8; }
+.p66-status-item .p66-st-value { display:flex; align-items:center; gap:7px; font-size:13px;
+                                 font-weight:700; color:#E6EDF7; margin-top:5px; }
+.p66-dot { width:8px; height:8px; border-radius:50%; display:inline-block; flex:0 0 auto; }
+.p66-dot-green { background:#2EBD85; box-shadow:0 0 6px rgba(46,189,133,.55); }
+.p66-dot-amber { background:#E3A53C; box-shadow:0 0 6px rgba(227,165,60,.45); }
+.p66-dot-red { background:#E05C55; box-shadow:0 0 6px rgba(224,92,85,.5); }
+.p66-dot-gray { background:#5D6B85; }
+.p66-steps { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+.p66-step { display:flex; align-items:center; gap:8px; border:1px solid #1E2A40;
+            background:#0B1220; border-radius:10px; padding:8px 12px; font-size:12px;
+            color:#C9D4E3; }
+.p66-step b { color:#4C7DF0; font-size:12.5px; }
+.p66-step-num { display:grid; place-items:center; min-width:26px; height:24px;
+    flex:0 0 auto; padding:0 6px; border-radius:7px; font-size:11px; font-weight:800;
+    letter-spacing:.5px; color:#BAD3FF; background:#14233F; border:1px solid #2F5ED6; }
+.p66-arrow { color:#5D6B85; }
+.p66-code { font-family:"Cascadia Code",Consolas,monospace; background:#0B1220;
+            border:1px solid #232F4A; border-radius:10px; padding:10px 12px;
+            font-size:12.5px; color:#AFC4F0; display:flex; justify-content:space-between;
+            align-items:center; gap:10px; margin-top:12px; }
+.p66-note { color:#8B96A8; font-size:12px; margin-top:8px; line-height:1.55; }
+.p66-chip { display:inline-flex; align-items:center; gap:6px; border-radius:999px;
+            padding:4px 10px; font-size:10.5px; letter-spacing:.8px;
+            text-transform:uppercase; font-weight:700; border:1px solid; }
+.p66-chip-green { color:#7FE0B8; border-color:#1F5A44; background:rgba(46,189,133,.08); }
+.p66-chip-gray { color:#9AA7BC; border-color:#2A3854; background:rgba(93,107,133,.08); }
+.p66-chip-amber { color:#F0C477; border-color:#5A421F; background:rgba(227,165,60,.08); }
+.p66-chip-blue { color:#BAD3FF; border-color:#2F5ED6; background:rgba(76,125,240,.08); }
+
+/* landing + login */
+.p66-hero { padding:22px 8px 4px; }
+.p66-hero-brand { display:flex; align-items:center; gap:12px; }
+.p66-hero-brand .p42-brand-mark { width:44px; height:44px; font-size:24px; border-radius:12px; }
+.p66-hero-name { font-size:22px; font-weight:800; letter-spacing:.2px; color:#EFF3F9; }
+.p66-hero-name small { display:block; font-size:11px; letter-spacing:1.6px;
+                       text-transform:uppercase; color:#8B96A8; font-weight:600; margin-top:2px; }
+.p66-hero-tagline { font-size:17px; color:#C9D4E3; margin-top:16px; }
+.p66-hero-tagline b { color:#7FA0F0; }
+.p66-hero-sub { color:#8B96A8; font-size:13px; margin-top:8px; max-width:540px; line-height:1.6; }
+.p66-feat { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr));
+            gap:12px; margin-top:20px; }
+.p66-feat-card { border:1px solid #1E2A40; border-radius:12px; background:#0E1624;
+                 padding:14px 16px; }
+.p66-feat-card .p66-feat-icon { color:#4C7DF0; font-size:20px; }
+.p66-feat-card .p66-feat-title { font-size:12.5px; font-weight:700; margin-top:6px; color:#E6EDF7; }
+.p66-feat-card .p66-feat-desc { font-size:11.5px; color:#8B96A8; margin-top:3px; line-height:1.5; }
+.p66-login-wrap { display:flex; align-items:center; justify-content:center; padding:34px 6px; }
+.p66-login-card { width:100%; max-width:400px; border:1px solid #232F4A; border-radius:16px;
+                  background:#0C1322; padding:26px 26px 22px;
+                  box-shadow:0 12px 30px rgba(0,0,0,.4); }
+.p66-login-title { font-size:18px; font-weight:800; color:#EFF3F9; }
+.p66-login-sub { color:#8B96A8; font-size:12.5px; margin-top:4px; }
+.p66-role-row { display:flex; gap:12px; margin-top:16px; flex-wrap:wrap; }
+.p66-role-item { border:1px solid #1E2A40; border-radius:10px; padding:9px 12px; flex:1;
+                 min-width:130px; background:#0B1220; }
+.p66-role-item b { font-size:12px; color:#E6EDF7; }
+.p66-role-item span { font-size:11px; color:#8B96A8; display:block; margin-top:2px; }
+.p66-cta { display:flex; gap:10px; margin-top:20px; flex-wrap:wrap; }
+
+/* ---- Phase 66 premium SOC accelerators (component-scoped) ---- */
+.p66-avatar { width:30px; height:30px; border-radius:50%; flex:0 0 auto; display:grid;
+              place-items:center; font-size:11px; font-weight:700; color:#DCE7FF;
+              background:#1B2C52; border:1px solid #3B67C9; }
+.p66-top-meta { display:flex; align-items:center; gap:9px; }
+.p66-top-user { font-size:12px; font-weight:600; color:#E6EDF7; line-height:1.2; }
+.p66-top-user span { display:block; font-size:9.5px; letter-spacing:1.1px;
+                     text-transform:uppercase; color:#8B96A8; font-weight:600; }
+.p66-sub-title { font-size:12.5px; color:#C9D4E3; }
+.p66-sub-title b { color:#7FA0F0; font-weight:700; }
+
+.p66-page-head { margin:2px 0 10px; }
+.p66-page-head .p66-page-title { font-size:24px; font-weight:800; letter-spacing:.2px;
+    color:#EFF3F9; }
+.p66-page-head .p66-page-sub { font-size:13px; color:#8B96A8; margin-top:2px;
+    max-width:820px; }
+
+.p66-empty { border:1px dashed #2A3854; border-radius:14px; background:#0E1624;
+             padding:20px 22px; display:flex; gap:16px; align-items:flex-start;
+             margin:8px 0 16px; }
+.p66-empty .p66-empty-ic { width:40px; height:40px; border-radius:12px; flex:0 0 auto;
+                           display:grid; place-items:center; background:#14233F;
+                           color:#7FA0F0; font-size:20px; border:1px solid #2F5ED6; }
+.p66-empty .p66-empty-title { font-size:15px; font-weight:800; color:#E6EDF7; letter-spacing:.3px; }
+.p66-empty .p66-empty-desc { font-size:12.5px; color:#8B96A8; margin-top:4px; line-height:1.55;
+                             max-width:820px; }
+.p66-empty .p66-empty-warn { border-color:#5A441F; }
+.p66-empty .p66-empty-warn .p66-empty-ic { background:#291E11; color:#F6C794;
+                                            border-color:#7A5324; }
+
+.p66-live-cam-ph { border:1px dashed #263450; border-radius:10px; background:#0B1220;
+                   padding:14px 16px; margin-top:12px; display:flex; align-items:center;
+                   gap:12px; }
+.p66-live-cam-ph .p66-ic { color:#5D6B85; font-size:20px; }
+.p66-live-cam-ph .p66-t { font-size:12.5px; font-weight:700; color:#9AA7BC;
+                          letter-spacing:.4px; }
+.p66-live-cam-ph .p66-s { font-size:11px; color:#5E6B82; margin-top:2px; }
+
+.p66-illus { position:relative; border:1px solid #1E2A40; border-radius:16px;
+             min-height:140px; overflow:hidden; display:flex; align-items:center;
+             justify-content:center; margin-top:16px;
+             background:radial-gradient(120% 120% at 50% 0%, #101B34 0%, #0A0F1C 70%); }
+.p66-illus .p66-ring { position:absolute; border:1px solid rgba(76,125,240,.16); border-radius:50%; }
+.p66-illus .p66-ring.r1 { width:230px; height:230px; }
+.p66-illus .p66-ring.r2 { width:162px; height:162px; }
+.p66-illus .p66-ring.r3 { width:94px; height:94px; }
+.p66-illus .p66-core { width:14px; height:14px; border-radius:50%; background:#4C7DF0;
+                       box-shadow:0 0 0 6px rgba(76,125,240,.14),0 0 26px rgba(76,125,240,.5); }
+.p66-illus .p66-ic-mark { position:absolute; top:14px; right:16px; font-size:10px;
+                          letter-spacing:1.2px; text-transform:uppercase; color:#5E6B82; }
+.p66-illus .p66-dot { position:absolute; width:5px; height:5px; border-radius:50%;
+                      background:#7FA0F0; opacity:.55; }
+.p66-illus .p66-cam { position:absolute; top:14px; left:16px; font-size:11px; color:#8B96A8;
+                      display:flex; align-items:center; gap:6px; }
+
+.p42-sb-brand { display:flex; align-items:center; gap:11px; padding:2px 2px 12px; }
+.p42-sb-brand .p42-brand-mark { width:38px; height:38px; font-size:20px; border-radius:10px; }
+.p42-sb-name { font-size:15px; font-weight:800; letter-spacing:.2px; color:#EFF3F9; line-height:1.2; }
+.p42-sb-sub { font-size:9px; letter-spacing:1.6px; text-transform:uppercase; color:#8B96A8; font-weight:600; }
+.p42-sb-groups { display:flex; flex-direction:column; gap:11px; margin:2px 0 6px; }
+.p42-sb-group-label { font-size:9.5px; letter-spacing:1.6px; text-transform:uppercase;
+                      color:#5E6B82; font-weight:700; margin-bottom:5px; }
+.p42-sb-item { font-size:12px; color:#9AA7BC; padding-left:9px; border-left:1px solid #1E2A40;
+               line-height:1.65; }
+.p42-sb-item b { color:#8B96A8; font-weight:600; }
+
+.p66-toolbar { display:flex; align-items:center; justify-content:flex-end; gap:10px;
+               flex-wrap:wrap; margin-top:2px; }
 </style>
 """
 
@@ -857,6 +1049,66 @@ section[data-testid="stSidebar"] [data-testid="stSidebarContent"] > div > div:fi
     background:linear-gradient(90deg,#4C7DF0 0%,#2A47A8 45%,#0E1624 100%);
     z-index:9999;
 }
+
+/* ---- Phase 66 premium SOC theme (host document) ---- */
+[data-testid="stAppViewContainer"] { background:#070B15; }
+[data-testid="stSidebar"] { background:#0B101D; border-right:1px solid #1A2438; }
+div[data-testid="stMetric"] {
+    background:linear-gradient(180deg,#101B2E 0%,#0D1526 100%);
+    border:1px solid #223052; border-radius:14px; padding:14px 16px;
+    box-shadow:0 2px 12px rgba(0,0,0,.28); border-top:2px solid transparent;
+    transition:border-color .15s ease, box-shadow .15s ease;
+}
+div[data-testid="stMetric"]:hover { border-color:#2F5ED6; box-shadow:0 4px 18px rgba(0,0,0,.35); }
+div[data-testid="stMetricLabel"] { font-size:10.5px; letter-spacing:1.2px; color:#8B96A8; }
+div[data-testid="stMetricValue"] { font-size:1.75rem; font-weight:800; letter-spacing:.3px; }
+div[data-testid="stMetricDelta"] { font-size:11.5px; }
+.stButton > button { border-radius:10px; font-weight:600;
+    transition:border-color .15s ease, background .15s ease, transform .05s ease; }
+.stButton > button:hover { border-color:#4C7DF0; }
+.stButton > button:active { transform:translateY(1px); }
+.stButton > button[kind="primary"] { background:linear-gradient(180deg,#2A47A8,#25419E); }
+section[data-testid="stSidebar"] .st-key-p42_nav [role="radiogroup"] label p {
+    padding:8px 11px; border-radius:8px;
+}
+section[data-testid="stSidebar"] .st-key-p42_nav [role="radiogroup"] label[aria-checked="true"] p {
+    background:linear-gradient(90deg,#1B2C52 0%,#14203A 100%);
+    border:1px solid #3B67C9; color:#DCE7FF; font-weight:600;
+    box-shadow:inset 3px 0 0 #4C7DF0;
+}
+div[data-testid="stRadio"] [role="radiogroup"][aria-orientation="horizontal"] {
+    gap:6px; flex-wrap:wrap;
+}
+div[data-testid="stRadio"] [role="radiogroup"][aria-orientation="horizontal"] label {
+    border:1px solid #1E2A40; border-radius:9px; padding:3px 12px; background:#0E1624;
+    transition:border-color .15s ease, background .15s ease;
+}
+div[data-testid="stRadio"] [role="radiogroup"][aria-orientation="horizontal"] label[aria-checked="true"] {
+    background:#1B2C52; border-color:#3B67C9;
+}
+[data-testid="stDataFrame"] { border-radius:12px; overflow-x:auto;
+    background:#0E1624; }
+section[data-testid="stMain"] [data-testid="stHorizontalBlock"] { gap:.75rem; }
+.stTextInput input, .stTextArea textarea, .stNumberInput input, .stDateInput div[data-baseweb="input"],
+.stSelectbox div[data-baseweb="select"] {
+    border-radius:9px !important; transition:border-color .15s ease;
+}
+.stTextInput input:focus { border-color:#4C7DF0 !important; }
+:focus-visible { outline:2px solid #4C7DF0 !important; outline-offset:2px; }
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] { padding-top:.5rem; }
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition:none !important; animation:none !important; }
+}
+@media (max-width: 920px) {
+    [data-testid="stHorizontalBlock"] { flex-wrap:wrap; }
+    [data-testid="stHorizontalBlock"] > div { flex:1 1 50% !important; min-width:240px; }
+    section[data-testid="stSidebar"] { min-width:240px; }
+}
+@media (max-width: 640px) {
+    [data-testid="stHorizontalBlock"] > div { flex:1 1 100% !important; min-width:0; }
+    .stButton > button, div[data-testid="stMetric"] { width:100%; }
+}
 </style>
 """,
         unsafe_allow_html=True,
@@ -867,12 +1119,19 @@ def _render_topbar(role: str) -> None:
     snap = _snapshot_status(load_live_state())
     clock = time.strftime("%H:%M:%S")
     day = time.strftime("%a, %d %b %Y")
+    username = "Administrator" if role == "admin" else "Viewer"
     role_badge = (f"<span class='p42-role-badge'><span class='p42-ic'>admin_panel_settings</span>"
                   f"Admin</span>") if role == "admin" else (
                   f"<span class='p42-role-badge'><span class='p42-ic'>visibility</span>Viewer</span>")
+    # Dashboard and daemon are SEPARATE states: the top system chip never marks
+    # the whole system down just because main.py is not running (Part 4).
     sys_label = {"live": "SYSTEM ONLINE", "stale": "SYSTEM DEGRADED",
                  "offline": "DAEMON OFFLINE"}[snap["kind"]]
     sys_tone = {"live": "green", "stale": "orange", "offline": "gray"}[snap["kind"]]
+    security = (load_live_state() or {}).get("security", {}) or {}
+    open_inc = security.get("open_incidents")
+    bell_label = ("0" if open_inc is None else str(open_inc))
+    bell_tone = ("green" if open_inc in (None, 0) else "orange")
     updated = (f"Last updated {html.escape(str(snap['iso']))}"
                if snap["iso"] != "—" else "Last updated —")
     st.html(
@@ -886,10 +1145,17 @@ def _render_topbar(role: str) -> None:
     </div>
   </div>
   <div class='p42-topbar-right'>
-    {_chip_html({"label": sys_label, "tone": sys_tone, "icon": snap["icon"]}, "p42-chip-lg")}
+    {_chip_html({"label": f"● {sys_label}", "tone": sys_tone, "icon": snap["icon"]}, "p42-chip-lg")}
     {_chip_html({"label": f"Snapshot: {snap['label']}", "tone": snap["tone"], "icon": snap["icon"]})}
+    {_chip_html({"label": f"Notifications {bell_label}",
+                 "tone": bell_tone, "icon": "notifications"})}
     <span class='p42-mut'>{updated}</span>
     {role_badge}
+    <div class='p66-top-meta'>
+      <div class='p66-avatar'><span class='p42-ic'>account_circle</span></div>
+      <div class='p66-top-user'>{html.escape(username)}
+        <span>{'Full system access' if role == 'admin' else 'Read-only access'}</span></div>
+    </div>
     <div class='p42-clock'><b>{clock}</b><br/><span>{day}</span></div>
   </div>
 </div>
@@ -934,21 +1200,315 @@ def _panel_html(kind: str, icon: str, title: str, msg: str) -> str:
     )
 
 
-def _render_daemon_offline_panel() -> None:
-    """Honest premium empty-state: no live inference snapshot available.
+def _p66_card_html(title: str, sub: str, chip_label: str, chip_cls: str,
+                   items: list[tuple[str, str, str]],
+                   steps: list[str] | None = None,
+                   note_text: str | None = None) -> str:
+    """Build a Phase-66 premium status card as pure HTML (never calls st.*).
 
-    Never presented as a security incident and never fabricated.  Explains
-    that the dashboard is online while the inference daemon is not running.
+    ``items`` are ``(label, value, dot_class)`` status rows; ``steps`` is an
+    optional progression row; ``note_text`` is appended as a muted caption
+    (may contain inline ``<code>``).  Kept pure so tests assert exact copy
+    without a Streamlit runtime.
     """
-    st.html(_COMPONENT_CSS + _panel_html(
-        "off", "sensors_off",
-        "DAEMON OFFLINE — No live inference snapshot available.",
-        "The Streamlit dashboard is online, but the CCTV inference daemon is "
-        "not running in this environment. Start it on the local/office machine "
-        "with <code>python main.py --source auto --headless --no-email</code>. "
-        "Configuration, settings, reports, analytics and historical data remain "
-        "fully available."
-    ))
+    grid = ""
+    if items:
+        grid = ("<div class='p66-status-grid'>" + "".join(
+            f"<div class='p66-status-item'><div class='p66-st-label'>"
+            f"{html.escape(label or '')}</div>"
+            f"<div class='p66-st-value'><span class='p66-dot "
+            f"{dot or 'p66-dot-gray'}'></span>{html.escape(value or '—')}</div></div>"
+            for label, value, dot in items
+        ) + "</div>")
+    steps_html = ""
+    if steps:
+        joined = "<span class='p66-arrow'>→</span>".join(
+            f"<div class='p66-step'>{step}</div>" for step in steps)
+        steps_html = f"<div class='p66-steps'>{joined}</div>"
+    note_html = f"<div class='p66-note'>{note_text}</div>" if note_text else ""
+    return (
+        _COMPONENT_CSS +
+        "<div class='p66-status-card'>"
+        "<div class='p66-status-head'><div>"
+        f"<div class='p66-status-title'>{html.escape(title)}</div>"
+        f"<div class='p66-status-sub'>{html.escape(sub)}</div>"
+        "</div>"
+        f"<span class='p66-chip {chip_cls}'>{html.escape(chip_label)}</span>"
+        "</div>"
+        + grid + steps_html + note_html +
+        "</div>"
+    )
+
+
+def _render_daemon_offline_panel() -> None:
+    st.html(_daemon_offline_panel_html())
+    st.code("python main.py --source webcam --headless", language="bash")
+
+
+def _daemon_offline_panel_html() -> str:
+    """Parts 3-4: premium daemon-offline state for the SOC dashboard.
+
+    Never presented as an incident and never fabricated.  Communicates the
+    dashboard/daemon split honestly: the dashboard is online, live
+    intelligence is waiting for the CCTV daemon on the office machine.
+    """
+    return _p66_card_html(
+        title="Live intelligence is currently offline",
+        sub=("The Streamlit dashboard is online, but the CCTV inference daemon is "
+             "not running in this environment. Live KPIs show no-data states until "
+             "a real snapshot arrives — nothing here is fabricated or assumed."),
+        chip_label="STATUS: DAEMON OFFLINE",
+        chip_cls="p66-chip-gray",
+        items=[
+            ("Dashboard", "ONLINE", "p66-dot-green"),
+            ("CCTV Daemon", "OFFLINE", "p66-dot-gray"),
+            ("Live Data", "WAITING", "p66-dot-amber"),
+        ],
+        note_text=("Streamlit Cloud provides the dashboard. Your physical webcam / "
+                   "CCTV camera must remain connected to the machine running the CCTV "
+                   "daemon (an office/edge machine), where <code>main.py</code> writes "
+                   "the live snapshots this dashboard reads. Configuration, settings, "
+                   "reports, analytics and historical data remain fully available."),
+    )
+
+
+def _render_live_offline_panel() -> None:
+    st.html(_live_offline_panel_html())
+    st.code("python main.py --source webcam --headless", language="bash")
+
+
+def _live_offline_panel_html() -> str:
+    """Part 6: premium daemon-offline state for the Live Monitoring page."""
+    return _p66_card_html(
+        title="Live monitoring is unavailable",
+        sub=("The inference daemon is not running, so there is no live feed to "
+             "display. Start it on the machine connected to your cameras, then "
+             "this page resumes automatically."),
+        chip_label="INFERENCE: OFFLINE",
+        chip_cls="p66-chip-gray",
+        items=[
+            ("Dashboard", "ONLINE", "p66-dot-green"),
+            ("Inference", "OFFLINE", "p66-dot-gray"),
+            ("Camera Feed", "NOT CONNECTED", "p66-dot-gray"),
+            ("Last Snapshot", "NONE", "p66-dot-gray"),
+        ],
+        note_text=("Start <code>python main.py --source webcam --headless</code> on "
+                   "the office machine connected to your cameras to resume live "
+                   "monitoring."),
+    )
+
+
+def _analytics_period_empty_html(start: "date", end: "date") -> str:
+    """Part 10: honest empty state for the historical analytics range."""
+    return _p66_card_html(
+        title="No analytics data available for this period",
+        sub=(f"The range {start.isoformat()} → {end.isoformat()} contains no "
+             "observed activity. Analytics render from real activity logs — an "
+             "empty period means nothing was recorded, never an invented number."),
+        chip_label="NO DATA RECORDED",
+        chip_cls="p66-chip-gray",
+        items=[],
+        note_text=("Expecting data? Start the daemon with "
+                   "<code>python main.py --source webcam --headless</code>, then "
+                   "re-run this range once activity has been logged."),
+    )
+
+
+def _reports_empty_html() -> str:
+    """Part 11: honest empty state for the Report Center."""
+    return _p66_card_html(
+        title="No report data available for the selected period",
+        sub=("Reports are generated automatically at the configured end-of-day "
+             "hour, on graceful daemon shutdown, or on demand with the <b>r</b> "
+             "hotkey in the live HUD. Once the daemon writes a full work day, "
+             "the Excel export appears here."),
+        chip_label="NO REPORTS GENERATED",
+        chip_cls="p66-chip-gray",
+        items=[],
+        note_text=("Report downloads are made available unmodified as soon as a "
+                   "report exists."),
+    )
+
+
+def _system_status_html(live: dict, db_ok: bool, cams_configured: int,
+                        stale_s: float | None) -> str:
+    """Part 8: five-row System Status card (pure HTML, real states only).
+
+    Rows are independent: the dashboard, the database, the CCTV daemon, live
+    data flow and the camera runtime each report their own health. A stopped
+    daemon never marks the dashboard or the database as failed.
+    """
+    rows = []
+    rows.append(("Dashboard", "ONLINE", "p66-dot-green"))
+    rows.append(("Database", "CONNECTED", "p66-dot-green")
+                if db_ok else ("Database", "FAILED", "p66-dot-red"))
+    if live:
+        rows.append(("CCTV Daemon", "ONLINE", "p66-dot-green"))
+        rows.append(("Live Data", "AVAILABLE", "p66-dot-green"))
+        runtime = ("READY" if live.get("camera_health") else "UNAVAILABLE")
+        runtime_dot = ("p66-dot-green" if runtime == "READY" else "p66-dot-red")
+    else:
+        rows.append(("CCTV Daemon", "OFFLINE", "p66-dot-gray"))
+        rows.append(("Live Data",
+                     "STALE" if stale_s is not None else "WAITING",
+                     "p66-dot-amber"))
+        runtime = "NOT CONFIGURED" if not cams_configured else "UNAVAILABLE"
+        runtime_dot = "p66-dot-gray"
+    rows.append(("Camera Runtime", runtime, runtime_dot))
+
+    if live:
+        chip_label, chip_cls = "LIVE", "p66-chip-green"
+    elif stale_s is not None:
+        chip_label, chip_cls = "STALE", "p66-chip-amber"
+    else:
+        chip_label, chip_cls = "NO SNAPSHOT", "p66-chip-gray"
+    return _p66_card_html(
+        title="System Status",
+        sub=("Independent component states from real runtime data. A stopped "
+             "CCTV daemon leaves the dashboard and database online — only the "
+             "live pipeline is waiting."),
+        chip_label=chip_label,
+        chip_cls=chip_cls,
+        items=rows,
+        note_text=("Camera Runtime READY means the daemon is connected to at "
+                   "least one camera feed. Database FAILED means the read-only "
+                   "SQLite handle could not be opened — check the System Check "
+                   "page."),
+    )
+
+
+def _render_system_status(live: dict) -> None:
+    conn = get_readonly_connection()
+    db_ok = conn is not None
+    cams = 0
+    if not live:
+        cams = _cameras_configured()
+    stale_s = None if live else live_state_age()
+    st.html(_system_status_html(live, db_ok, cams, stale_s))
+
+
+def _p66_page_head_html(title: str, sub: str) -> str:
+    """Premium page header (Part 2): title + subtitle above the streamlit header."""
+    return (
+        _COMPONENT_CSS +
+        "<div class='p66-page-head'>"
+        f"<div class='p66-page-title'>{html.escape(title)}</div>"
+        f"<div class='p66-page-sub'>{html.escape(sub)}</div>"
+        "</div>"
+    )
+
+
+def _p66_empty_state_html(headline: str, description: str, *,
+                          kind: str = "NO_DATA", action: str | None = None) -> str:
+    """Part 19: ONE reusable premium empty-state component.
+
+    ``kind`` maps to an icon + tone:
+      * ``NO_DATA`` / ``WAITING``  -> muted query icon
+      * ``DAEMON_OFFLINE``         -> muted link-off icon
+      * ``CAMERA_OFFLINE``         -> muted videocam-off icon
+      * ``NOT_CONFIGURED``         -> muted settings icon
+      * ``ERROR``                  -> amber error icon
+    ``action`` is optional plain-text guidance rendered as a small chip.
+    Returns pure HTML; never shows a default ``st.info`` box.
+    """
+    icons = {
+        "NO_DATA": "query_stats",
+        "WAITING": "hourglass_top",
+        "DAEMON_OFFLINE": "link_off",
+        "CAMERA_OFFLINE": "videocam_off",
+        "NOT_CONFIGURED": "settings_input_antenna",
+        "ERROR": "error_outline",
+    }
+    warn = kind == "ERROR"
+    icon = icons.get(kind, "info")
+    action_html = (f"<div class='p66-empty-action'><span class='p66-chip "
+                   f"p66-chip-blue'>{html.escape(action)}</span></div>"
+                   if action else "")
+    return (
+        _COMPONENT_CSS +
+        f"<div class='p66-empty{' p66-empty-warn' if warn else ''}'>"
+        f"<span class='p66-empty-ic'><span class='p42-ic'>{icon}</span></span>"
+        "<div>"
+        f"<div class='p66-empty-title'>{html.escape(headline)}</div>"
+        f"<div class='p66-empty-desc'>{html.escape(description)}</div>"
+        f"{action_html}"
+        "</div></div>"
+    )
+
+
+def _has_observed_activity(df_today: pd.DataFrame) -> bool:
+    """True only when a real observation exists in today's metrics.
+
+    A roster row that was never seen (status == 'NOT OBSERVED') is NOT
+    data -- it must not hide behind a fabricated zero or a bar chart.
+    """
+    if df_today is None or df_today.empty:
+        return False
+    cols = set(df_today.columns)
+    if "status" in cols:
+        statuses = df_today["status"].astype(str).str.strip().str.upper()
+        if (statuses == "OBSERVED").any():
+            return True
+    for col in ("active_hours", "phone_mins", "away_mins"):
+        if col in cols:
+            vals = pd.to_numeric(df_today[col], errors="coerce")
+            if vals.notna().any() and (vals > 0).any():
+                return True
+    if "productive_pct" in cols:
+        vals = pd.to_numeric(df_today["productive_pct"], errors="coerce")
+        if vals.notna().any():
+            return True
+    return False
+
+
+def _render_productivity_empty(df_today: pd.DataFrame) -> None:
+    st.html(_productivity_empty_html(df_today))
+
+
+def _productivity_empty_html(df_today: pd.DataFrame) -> str:
+    """Part 7: 'NO PRODUCTIVITY DATA' with the compact 3-step progression.
+
+    Distinguishes 'employees registered but nothing observed' from 'nothing
+    configured and nothing recorded' -- both honest, neither fabricated.
+    """
+    have_roster = df_today is not None and not df_today.empty
+    sub = (
+        "Productivity metrics will appear after the CCTV inference daemon "
+        "records valid employee activity. Employees are registered, but no "
+        "observed activity has been logged yet today."
+        if have_roster else
+        "Productivity metrics will appear after the CCTV inference daemon "
+        "records valid employee activity. No employees are configured and "
+        "nothing has been recorded today."
+    )
+    return _p66_card_html(
+        title="NO PRODUCTIVITY DATA",
+        sub=sub,
+        chip_label="AWAITING DATA",
+        chip_cls="p66-chip-amber",
+        items=[],
+        steps=[
+            "<span class='p66-step-num'>01</span> Add employees",
+            "<span class='p66-step-num'>02</span> Start the CCTV daemon",
+            "<span class='p66-step-num'>03</span> Activity data appears",
+        ],
+        note_text=("Nothing is assumed while data is pending — KPIs show “—” "
+                   "(no data) instead of fabricated zeros."),
+    )
+
+
+def _error_card_html(title: str, msg: str) -> str:
+    """Pure Phase 66 error-card markup (raw tracebacks are never shown)."""
+    diag = f"DIAG-{int(time.time()) % 100000:05d}"
+    return (
+        _COMPONENT_CSS +
+        "<div class='p42 p42-error-card'>"
+        f"<div class='p42-error-title'>{html.escape(title)}</div>"
+        f"<div class='p42-error-msg'>{html.escape(msg)}</div>"
+        f"<div class='p42-diag-id'>Diagnostic ID: <b>{diag}</b></div>"
+        "<div class='p42-error-msg'>Please check System Check or contact "
+        "an administrator.</div></div>"
+    )
 
 
 def _render_error_card(title: str, msg: str) -> None:
@@ -958,15 +1518,7 @@ def _render_error_card(title: str, msg: str) -> None:
     id so support can cross-reference logs without exposing internals.
     """
     logging.getLogger("cctv.dashboard").error("UI error [%s]: %s", title, msg)
-    diag = f"{int(time.time()) % 100000:05d}"
-    st.html(
-        _COMPONENT_CSS +
-        "<div class='p42 p42-error-card'>"
-        f"<div class='p42-error-title'>{html.escape(title)}</div>"
-        f"<div class='p42-error-msg'>{html.escape(msg)}</div>"
-        f"<div class='p42-diag-id'>Diagnostic id <b>{diag}</b> — this incident "
-        "was logged internally.</div></div>"
-    )
+    st.html(_error_card_html(title, msg))
 
 
 def _render_dashboard_metrics(live: dict, m: dict, df_today: pd.DataFrame = None) -> None:
@@ -978,40 +1530,91 @@ def _render_dashboard_metrics(live: dict, m: dict, df_today: pd.DataFrame = None
     k = _live_kpis(live, pd.DataFrame())
     cams = f"{k['cameras_online']}/{k['cameras_total']}" if k["cameras_total"] else "—"
     open_inc = "—" if k["open_incidents"] is None else str(k["open_incidents"])
+    live_na = not live
     has_data = df_today is not None and not df_today.empty
+    observed = _has_observed_activity(df_today)
     r1a, r1b, r1c = st.columns(3)
     r1a.metric("Cameras Online", cams,
                help="Operational camera feeds (health == ONLINE). A camera that is "
                     "offline / not delivering usable frames is never counted as AWAY.")
-    r1b.metric("People Active", f"{k['active']}",
-               help="Employees currently ACTIVE in the live snapshot.")
-    r1c.metric("Away", f"{k['away']}",
+    r1b.metric("People Active", "—" if live_na else f"{k['active']}",
+               help="Employees currently ACTIVE in the live snapshot. Shown as — "
+                    "when no live snapshot exists.")
+    r1c.metric("Away", "—" if live_na else f"{k['away']}",
                help="Employees currently AWAY (from the daemon, not a frontend timer).")
     r2a, r2b, r2c = st.columns(3)
-    r2a.metric("On Phone", f"{k['on_phone']}",
+    r2a.metric("On Phone", "—" if live_na else f"{k['on_phone']}",
                help="Employees currently in ON_PHONE state (one alert per episode).")
     r2b.metric("Open Incidents", open_inc,
                help="Open incidents from the security snapshot (real security events).")
-    r2c.metric("Recognised Today", m["recognised"] if has_data else "n/a",
+    r2c.metric("Recognised Today", str(m["recognised"]) if observed else "—",
                help="Employees with at least one real observation today (roster "
                     "rows that were never observed are not counted).")
     r3a, r3b, r3c = st.columns(3)
-    r3a.metric("Average Productivity", f"{m['avg_pct']:.0f}%" if m["avg_pct"] else "n/a",
+    r3a.metric("Average Productivity",
+               f"{m['avg_pct']:.0f}%" if m["avg_pct"] and observed else "—",
                help="Mean productive percentage across observed employees today.")
-    r3b.metric("Active Hours Today", f"{m['total_active']:.1f}h" if has_data else "n/a",
+    r3b.metric("Active Hours Today", f"{m['total_active']:.1f}h" if observed else "—",
                help="Total active hours logged so far today (real analytics).")
-    r3c.metric("Phone Today", f"{m['phone_mins']:.0f}m" if has_data else "n/a",
+    r3c.metric("Phone Today", f"{m['phone_mins']:.0f}m" if observed else "—",
                help="Total phone minutes observed today (real analytics).")
+
+
+def _cameras_configured() -> int:
+    """Camera records persisted in the camera store (read-only, cloud-safe).
+
+    ``config.CAMERAS`` is the demo platform mapping and is always populated;
+    the store is the real source of truth for configured cameras.
+    """
+    conn = get_readonly_connection()
+    if conn is None:
+        return 0
+    try:
+        from src.camera_store import CameraStore
+        return len(CameraStore(conn).list())
+    except Exception:
+        return 0
 
 
 def _render_camera_cards(live: dict) -> None:
     if not live:
-        st.html(_COMPONENT_CSS + "<div class='p42 p42-empty'>No live daemon snapshot — "
-                "camera status is unavailable while `main.py` is not running.</div>")
+        if not _cameras_configured():
+            st.html(_p66_empty_state_html(
+                "NO CAMERAS CONFIGURED",
+                "Add your office CCTV/IP camera from Camera Management, then "
+                "start the daemon. No cameras configured means no camera "
+                "records exist yet — nothing here is simulated.",
+                kind="NOT_CONFIGURED",
+                action="Open Camera Management to add a camera"))
+            return
+        st.html(
+            _COMPONENT_CSS +
+            "<div class='p66-status-card'>"
+            "<div class='p66-status-head'>"
+            "<div>"
+            "<div class='p66-status-title'>Camera status is waiting for the CCTV "
+            "daemon</div>"
+            "<div class='p66-status-sub'>Camera health comes from the live daemon "
+            "snapshot, not from configuration. Camera records are ready — the "
+            "inference daemon is simply not connected.</div>"
+            "</div></div>"
+            "<div class='p66-steps'>"
+            "<span class='p66-chip p66-chip-green'>CAMERA CONFIGURATION READY</span>"
+            "<span class='p66-chip p66-chip-gray'>CCTV INFERENCE OFFLINE</span>"
+            "</div>"
+            "<div class='p66-note'>Start <code>main.py --source webcam --headless</code> "
+            "on the machine connected to your cameras to resume health reporting.</div>"
+            "</div>"
+        )
         return
     health = live.get("camera_health", {})
     if not health:
-        st.html(_COMPONENT_CSS + "<div class='p42 p42-empty'>No cameras configured.</div>")
+        st.html(_p66_empty_state_html(
+            "No cameras reporting",
+            "The daemon is running, but no camera health is in its snapshot yet. "
+            "This is a live-data state — camera health appears as soon as the "
+            "daemon starts reading frames.",
+            kind="CAMERA_OFFLINE"))
         return
     try:
         import config as _cfg
@@ -1019,6 +1622,15 @@ def _render_camera_cards(live: dict) -> None:
                                                  for c in health.values()}
     except Exception:  # pragma: no cover
         configured = {c.get("id") for c in health.values()}
+    # Optional enrichment from the admin camera store: display name + location.
+    camera_meta = {}
+    try:
+        from src.camera_store import CameraStore
+        _conn = get_readonly_connection()
+        if _conn is not None:
+            camera_meta = {r.camera_id: r for r in CameraStore(_conn).list()}
+    except Exception:  # pragma: no cover - enrichment is best-effort
+        camera_meta = {}
     cards = []
     for cid in sorted(health):
         h = health[cid]
@@ -1031,6 +1643,9 @@ def _render_camera_cards(live: dict) -> None:
                else f"{round(float(h.get('fps', 0) or 0), 2)}")
         src = h.get("source") or h.get("id") or cid
         source = _safe_cam_source(src)
+        rec = camera_meta.get(cid)
+        location = h.get("location") or (rec.location if rec else "") or "—"
+        display_name = (rec.name if rec and rec.name else cid)
         configured_s = ("Configured" if (src in configured or cid in configured)
                         else "Not configured")
         usable = h.get("usable")
@@ -1043,22 +1658,31 @@ def _render_camera_cards(live: dict) -> None:
                     "absence and never counts as AWAY." if not reason else
                     f"Feed not usable ({reason}) — preserved states are frozen; "
                     "this is never counted as AWAY.")
+        placeholder = ""
+        if str(code).upper() in ("OFFLINE", "NO_FRAME", "RECONNECTING"):
+            placeholder = (
+                "<div class='p66-live-cam-ph'><span class='p42-ic'>videocam_off</span>"
+                "<div><div class='p66-t'>CAMERA FEED OFFLINE</div>"
+                "<div class='p66-s'>Waiting for the CCTV inference daemon.</div></div></div>")
         kind = h.get("kind") or "rtsp"
         res = h.get("resolution") or "—"
         rconn = int(h.get("reconnects", 0) or 0)
         cards.append(
             f"<div class='p42-card'><div class='p42-cam-head'>"
-            f"<div><div class='p42-cam-name'>{html.escape(cid)}</div>"
-            f"<div class='p42-cam-id'>{html.escape(configured_s)}</div></div>{chip}</div>"
+            f"<div><div class='p42-cam-name'>{html.escape(display_name)}</div>"
+            f"<div class='p42-cam-id'>{html.escape(cid)} · {html.escape(configured_s)}</div>"
+            f"</div>{chip}</div>"
             f"<div class='p42-cam-meta'>"
-            f"<div><b>Last frame</b><span>{last_s}</span></div>"
-            f"<div><b>FPS</b><span>{fps}</span></div>"
-            f"<div><b>Source</b><span>{html.escape(source)}</span></div>"
+            f"<div><b>Location</b><span>{html.escape(location)}</span></div>"
             f"<div><b>Type</b><span>{html.escape(kind)}</span></div>"
+            f"<div><b>Last update</b><span>{last_s}</span></div>"
+            f"<div><b>FPS</b><span>{fps}</span></div>"
             f"<div><b>Resolution</b><span>{html.escape(res)}</span></div>"
             f"<div><b>Reconnects</b><span>{rconn}</span></div>"
+            f"<div><b>Source</b><span>{html.escape(source)}</span></div>"
             f"<div><b>Frames</b><span>{h.get('frames_read', 0)}</span></div>"
-            f"</div>{f'<div class=\'p42-cam-note\'>{note}</div>' if note else ''}</div>"
+            f"</div>{f'<div class=\'p42-cam-note\'>{note}</div>' if note else ''}"
+            f"{placeholder}</div>"
         )
     st.html(_COMPONENT_CSS + f"<div class='p42 cards'>{''.join(cards)}</div>")
 
@@ -1138,8 +1762,11 @@ def _render_people_cards(live: dict) -> None:
         )
 
     if not cards:
-        st.html(_COMPONENT_CSS + "<div class='p42 p42-empty'>No tracked people right "
-                "now. Presence cards appear as soon as the daemon detects someone.</div>")
+        st.html(_p66_empty_state_html(
+            "NO PRESENCE DATA",
+            "No tracked people right now. Presence cards appear as soon as the "
+            "daemon detects someone — nothing here is simulated.",
+            kind="WAITING"))
         return
     st.html(_COMPONENT_CSS + f"<div class='p42 cards'>{''.join(cards)}</div>")
 
@@ -1177,7 +1804,7 @@ def page_live_monitoring() -> None:
     )
     _render_snapshot_strip(live)
     if not live:
-        _render_daemon_offline_panel()
+        _render_live_offline_panel()
     _render_camera_cards(live)
     if live:
         _render_people_cards(live)
@@ -1224,6 +1851,11 @@ def _productivity_bar_figure(df_today: pd.DataFrame):
 
 
 def tab_live_overview():
+    st.html(_p66_page_head_html(
+        "Dashboard",
+        "Real-time overview of your security and workplace intelligence. "
+        "Every figure is real observed data — cameras offline or an absent "
+        "daemon are never counted as AWAY, and nothing is fabricated."))
     st.header("Live Overview")
     st.html(
         _COMPONENT_CSS +
@@ -1257,22 +1889,23 @@ def tab_live_overview():
 
     _render_dashboard_metrics(live, m, df_today)
 
+    _render_system_status(live)
+
     st.subheader("Today's Productivity per Employee")
-    if df_today.empty:
-        st.info("No data available yet today.\n\n"
-                "Start the daemon to open the webcam and begin logging:\n\n"
-                "    python main.py --source webcam --headless\n\n"
-                "Add employees first under the **Employees** tab so their face "
-                "can be recognised, then restart the daemon. KPIs and the bar "
-                "chart populate as soon as the first ACTIVE / ON_PHONE / AWAY "
-                "state is recorded.")
+    _rconn = get_readonly_connection()
+    if _rconn is None and _LAST_DB_ERROR:
+        st.error(
+            "Database unavailable for productivity analytics "
+            f"({_LAST_DB_ERROR}).")
+        return
+
+    if not _has_observed_activity(df_today):
+        _render_productivity_empty(df_today)
         return
 
     fig = _productivity_bar_figure(df_today)
     if fig is None:
-        st.info("Employees are registered, but no observed activity has been "
-                "logged yet today. Productivity bars appear once the daemon "
-                "records ACTIVE / ON_PHONE / AWAY states.")
+        _render_productivity_empty(df_today)
     else:
         st.plotly_chart(fig, width="stretch")
 
@@ -1344,6 +1977,33 @@ def tab_live_employees():
     unknown = 1 if ("Unknown" in states or "UNKNOWN" in states) else 0
     unknown_last_seen = last_seen_top.get("Unknown") or last_seen_top.get("UNKNOWN")
 
+    # -- Desk residency + today productivity (real data only) ----------------
+    seat_map = {}
+    try:
+        zones_raw = live.get("seat_zones") or {}
+        zones = zones_raw.get("zones", []) if isinstance(zones_raw, dict) else []
+        if isinstance(zones, dict):
+            zones = list(zones.values())
+        for zn in (zones or []):
+            who = (zn.get("current_identity") or zn.get("person_identity")
+                   or zn.get("identity") or "")
+            label = (zn.get("label") or zn.get("name") or zn.get("zone_id")
+                     or zn.get("id") or "")
+            if who and label:
+                seat_map.setdefault(str(who), str(label))
+    except Exception:  # pragma: no cover - enrichment is best-effort
+        seat_map = {}
+    prod_pct = {}
+    try:
+        prod_df = cached_day_metrics(date.today().isoformat())
+        if prod_df is not None and not prod_df.empty and "employee_id" in prod_df.columns:
+            for _, _row in prod_df.iterrows():
+                _v = _row.get("productive_pct")
+                if _v is not None and pd.notna(_v):
+                    prod_pct[str(_row["employee_id"])] = float(_v)
+    except Exception:  # pragma: no cover - enrichment is best-effort
+        prod_pct = {}
+
     rows = []
     for emp_id in sorted(employees.keys()):
         emp = employees[emp_id]
@@ -1364,6 +2024,11 @@ def tab_live_employees():
         rows.append({
             "Employee": display,
             "Status": _status_badge(emp.get("state", "")),
+            "Desk": seat_map.get(emp_id, "—"),
+            "Chair": "—",
+            "Confidence": "—",
+            "Productivity": (f"{prod_pct[emp_id]:.0f}%"
+                             if emp_id in prod_pct else "—"),
             "Session (h:mm)": session_str,
             "Source": emp.get("source", "—") or "—",
             "Active (h)": round(emp.get("active_sec", 0) / 3600, 2),
@@ -1387,6 +2052,10 @@ def tab_live_employees():
             "Employee": "Unknown person",
             "Status": _status_badge(states.get("Unknown", "Unknown") or
                                     states.get("UNKNOWN", "")),
+            "Desk": "—",
+            "Chair": "—",
+            "Confidence": "—",
+            "Productivity": "—",
             "Session (h:mm)": unk_session_str,
             "Source": sources.get("Unknown", "—") or sources.get("UNKNOWN", "—"),
             "Active (h)": round(u_telemetry.get("ACTIVE", 0) / 3600, 2),
@@ -1444,8 +2113,32 @@ def tab_live_employees():
                f"Cameras online: {online}/{len(cam_health)}  |  {det_note}")
 
 
+def _style_fig(fig):
+    """Phase 66: consistent premium dark theme for plotly charts (pure)."""
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="#0E1624",
+        font=dict(color="#C9D4E3", family="Segoe UI, system-ui, sans-serif"),
+        xaxis=dict(gridcolor="#1E2A40", zerolinecolor="#1E2A40",
+                   linecolor="#2A3854"),
+        yaxis=dict(gridcolor="#1E2A40", zerolinecolor="#1E2A40",
+                   linecolor="#2A3854"),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#8B96A8")),
+        coloraxis=dict(colorbar=dict(outlinewidth=0,
+                                     tickfont=dict(color="#8B96A8"))),
+        hoverlabel=dict(bgcolor="#101B2E", font_color="#E6EDF7"),
+        margin=dict(l=10, r=10, t=10, b=10),
+    )
+    fig.update_coloraxes(colorbar=dict(thickness=10, outlinewidth=0))
+    return fig
+
+
 def tab_historical():
-    st.header("Historical Analytics")
+    st.html(_p66_page_head_html(
+        "Analytics",
+        "Trends, attendance, phone usage, employee activity and security events "
+        "across the selected range — every chart is built from the real "
+        "analytics tables, never from fabricated values."))
 
     conn = get_readonly_connection()
     min_d = max_d = date.today()
@@ -1490,8 +2183,23 @@ def tab_historical():
 
     df = cached_range_metrics(start.isoformat(), end.isoformat())
     if df.empty:
-        st.info("No data in the selected range.")
+        st.html(_analytics_period_empty_html(start, end))
         return
+
+    # --- Period KPIs (real data) -------------------------------------------
+    pcts = df["productive_pct"].dropna()
+    phone_min = float(df["phone_mins"].sum() or 0)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Attendance",
+              str(df["employee_id"].nunique()),
+              help="Distinct employees with at least one recorded row in range.")
+    k2.metric("Average Productivity",
+              f"{pcts.mean():.0f}%" if len(pcts) else "—",
+              help="Mean productive percentage across observed rows in range.")
+    k3.metric("Phone Usage", f"{phone_min:.0f}m",
+              help="Total observed ON_PHONE minutes in range.")
+    k4.metric("Tracked Days", str(df["date"].nunique()),
+              help="Distinct dates with analytics rows in range.")
 
     st.subheader("Productivity Trend")
     by_day = df.groupby("date")["productive_pct"].mean().reset_index()
@@ -1500,9 +2208,16 @@ def tab_historical():
     fig.add_hrect(y0=80, y1=110, fillcolor="green", opacity=0.12, line_width=0)
     fig.add_hrect(y0=50, y1=80, fillcolor="yellow", opacity=0.12, line_width=0)
     fig.update_layout(height=360, yaxis_range=[0, 110])
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(_style_fig(fig), width="stretch")
 
-    st.subheader("Active Hours per Employee")
+    st.subheader("Phone Usage (minutes)")
+    agg_ph = df.groupby("employee_id")["phone_mins"].sum().reset_index()
+    agg_ph = agg_ph.sort_values("phone_mins", ascending=False)
+    fig_ph = px.bar(agg_ph, x="employee_id", y="phone_mins",
+                    labels={"phone_mins": "Phone (min)", "employee_id": "Employee"})
+    st.plotly_chart(_style_fig(fig_ph), width="stretch")
+
+    st.subheader("Employee Activity")
     agg = df.groupby("employee_id").agg(
         active_hours=("active_hours", "sum"),
         phone_mins=("phone_mins", "sum"),
@@ -1512,7 +2227,47 @@ def tab_historical():
     fig2 = px.bar(agg, x="employee_id", y="active_hours", color="avg_pct",
                   color_continuous_scale="Greens",
                   labels={"active_hours": "Active Hours", "employee_id": "Employee"})
-    st.plotly_chart(fig2, width="stretch")
+    st.plotly_chart(_style_fig(fig2), width="stretch")
+
+    st.divider()
+    st.subheader("Security Events in Range")
+    days_span = (end - start).days
+    if days_span > 31:
+        st.html(_p66_empty_state_html(
+            "Range too large for event charts",
+            "Security event charts are limited to 31-day spans to keep this "
+            "page fast. Pick a 31-day (or shorter) range to see them.",
+            kind="NO_DATA"))
+    else:
+        sev_events = []
+        try:
+            _conn = get_readonly_connection()
+            if _conn is not None:
+                _lo_s, _hi_s = start.isoformat(), end.isoformat()
+                sev_events = [e for e in EventStore(_conn).events(limit=20000)
+                              if _lo_s <= str(e.get("timestamp", ""))[:10] <= _hi_s]
+        except Exception:
+            pass
+        if sev_events:
+            sev_df = pd.DataFrame(sev_events)
+            if "event_type" in sev_df.columns:
+                by_type = sev_df["event_type"].value_counts().reset_index()
+                by_type.columns = ["event_type", "count"]
+                fig_sev = px.bar(by_type, x="event_type", y="count",
+                                 labels={"count": "Events"})
+                st.plotly_chart(_style_fig(fig_sev), width="stretch")
+            if "severity" in sev_df.columns:
+                sev_counts = sev_df["severity"].value_counts().reset_index()
+                sev_counts.columns = ["severity", "count"]
+                st.dataframe(sev_counts, width="stretch", hide_index=True)
+        else:
+            st.html(_p66_empty_state_html(
+                "No security events in range",
+                "No event was recorded within the selected range — an empty "
+                "result is genuine, never a silent failure.",
+                kind="NO_DATA"))
+        st.caption("Security events are recorded by the daemon from real "
+                   "detections only; blank feeds are never counted as events.")
 
     with st.expander("Daily breakdown table"):
         st.dataframe(df.sort_values(["date", "employee_id"]), width="stretch")
@@ -1783,18 +2538,65 @@ def tab_ai_capabilities():
 
 
 def tab_reports(role: str = "viewer"):
-    st.header("Report Center")
-    st.caption("Download any daily Excel report. Reports are generated "
-               "automatically at the configured end-of-day hour, on graceful "
-               "daemon shutdown, or on demand with the **r** hotkey in the live "
-               "HUD. Values match the dashboard and database exactly.")
+    st.html(_p66_page_head_html(
+        "Report Center",
+        "Daily Excel reports generated automatically at the configured "
+        "end-of-day hour, on graceful daemon shutdown, or on demand with the "
+        "r hotkey in the live HUD. Values match the dashboard and database "
+        "exactly."))
+
+    today = date.today()
+    c_lo, c_hi = st.columns(2)
+    from_d = c_lo.date_input("From", value=today - timedelta(days=7), key="rep_from")
+    to_d = c_hi.date_input("To", value=today, key="rep_to")
+    if from_d > to_d:
+        st.error("From must be on or before To.")
+        return
+
+    conn = get_readonly_connection()
+    lo_s, hi_s = from_d.isoformat(), to_d.isoformat()
+    att = avg = ph = sec_ev = sec_inc = "—"
+    if conn is not None:
+        try:
+            by_day = employee_range_metrics(conn, from_d, to_d, WORK_SCHEDULE)
+            rows = [r for _d, rs in by_day.items() for r in rs]
+            if rows:
+                pcts = [float(r["productive_pct"]) for r in rows
+                        if r.get("productive_pct") is not None]
+                att = len({r["employee_id"] for r in rows})
+                avg = (f"{sum(pcts) / len(pcts):.0f}%" if pcts else "—")
+                ph = f"{sum(float(r.get('phone_mins', 0) or 0) for r in rows):.0f}m"
+        except Exception:
+            pass
+        try:
+            evs = EventStore(conn).events(limit=10000)
+            sec_ev = sum(1 for e in evs
+                         if lo_s <= str(e.get("timestamp", ""))[:10] <= hi_s)
+        except Exception:
+            pass
+        try:
+            sec_inc = sum(1 for i in IncidentEngine(conn).list(limit=5000)
+                          if lo_s <= str(i.get("first_seen", ""))[:10] <= hi_s)
+        except Exception:
+            pass
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Attendance", att)
+    k2.metric("Productivity", avg)
+    k3.metric("Phone Usage", ph)
+    k4.metric("Security Events", sec_ev)
+    k5.metric("Incidents", sec_inc)
+    st.caption("KPIs reflect real analytics, security events and incidents "
+               f"within the selected range ({lo_s} → {hi_s}).")
 
     reports_dir = Path(REPORT_OUTPUT_DIR)
     reports_dir.mkdir(parents=True, exist_ok=True)
-    xlsx_files = sorted(reports_dir.glob("*.xlsx"),
-                        key=lambda p: p.stat().st_mtime, reverse=True)
+    all_files = list(reports_dir.glob("*.xlsx"))
+    xlsx_files = sorted(
+        (p for p in all_files if lo_s <= date.fromtimestamp(p.stat().st_mtime)
+         .isoformat() <= hi_s),
+        key=lambda p: p.stat().st_mtime, reverse=True)
     if xlsx_files:
-        st.subheader(f"{len(xlsx_files)} report(s)")
+        st.subheader(f"{len(xlsx_files)} report(s) in the selected range")
         can_export = _can_export(role)
         for path in xlsx_files:
             with st.container(border=True):
@@ -1813,10 +2615,7 @@ def tab_reports(role: str = "viewer"):
         if not can_export:
             st.caption("Your role cannot export reports.")
     else:
-        st.info("No reports generated yet. Start the daemon and let a work day "
-                "complete (or press **r** in the live HUD) and the first report "
-                "will appear here.")
-
+        st.html(_reports_empty_html())
     email_status = last_email_status()
     st.subheader("Email Delivery")
     ok = email_status.get("ok")
@@ -1853,8 +2652,9 @@ def tab_employees(role: str):
         st.html(_COMPONENT_CSS + _panel_html(
             "off", "group",
             "NO EMPLOYEES CONFIGURED",
-            "No roster rows exist yet. Create the first employee below — until a "
-            "person is registered the daemon cannot match anyone to the roster."
+            "No roster rows exist yet. Use the <b>Add / Edit Employee</b> form "
+            "below — <b>add your first employee</b>, then start the daemon and "
+            "the person becomes recognisable against the roster."
         ))
     else:
         faces = {p.stem for p in _faces_dir().glob("*")
@@ -1998,6 +2798,16 @@ def tab_employees(role: str):
         st.caption("- `INVALID_IMAGE` -- could not be read")
 
 
+def _severity_color(value) -> str:
+    """CSS color for a severity cell (pure; used by st.dataframe Styler)."""
+    v = str(value or "").lower()
+    colors = {"critical": "color:#FF7A8A;font-weight:700",
+              "high": "color:#F0C477",
+              "medium": "color:#8BC8FF",
+              "low": "color:#9AA7BC"}
+    return colors.get(v, "")
+
+
 def tab_security(role):
     """Security / Incidents tab (Phase 31)."""
     import config
@@ -2012,12 +2822,42 @@ def tab_security(role):
     live = load_live_state()
     security = live.get("security", {})
 
-    # --- Overview cards ---
+    # --- Premium security KPIs (real data; "—" when none is available) -----
+    try:
+        events_today = len(EventStore(conn).events(
+            day=date.today().isoformat(), limit=1000))
+    except Exception:
+        events_today = None
+    open_incidents = None
+    if events_today is not None:
+        try:
+            open_incidents = [
+                i for i in IncidentEngine(conn).list(limit=2000)
+                if str(i.get("status", "")).lower()
+                in ("open", "active", "investigating")]
+        except Exception:
+            open_incidents = None
+    sev_high = sev_critical = 0
+    if open_incidents is not None:
+        for _i in open_incidents:
+            _k = str(_i.get("severity", "")).lower()
+            if _k == "high":
+                sev_high += 1
+            elif _k == "critical":
+                sev_critical += 1
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Cameras Offline", security.get("cameras_offline", "n/a"))
-    c2.metric("Open Incidents", security.get("open_incidents", "n/a"))
-    c3.metric("High-Severity Open", security.get("high_severity_open", "n/a"))
-    c4.metric("Evidence Mode", security.get("evidence_mode", config.EVIDENCE_MODE))
+    c1.metric("Events Today",
+              "—" if events_today is None else events_today,
+              help="Real security events recorded for today by the daemon.")
+    c2.metric("Open Incidents",
+              "—" if open_incidents is None else len(open_incidents),
+              help="Incidents still open / under investigation (real ledger).")
+    c3.metric("High Severity",
+              "—" if open_incidents is None else sev_high,
+              help="Open incidents rated HIGH severity (never fabricated).")
+    c4.metric("Critical",
+              "—" if open_incidents is None else sev_critical,
+              help="Open incidents rated CRITICAL severity (never fabricated).")
 
     st.caption(f"Evidence storage: {security.get('evidence_storage_mb', 0)} MB "
                f"(recorded evidence, not continuous video)")
@@ -2031,6 +2871,18 @@ def tab_security(role):
 
     st.divider()
 
+    if not live:
+        st.html(
+            _COMPONENT_CSS +
+            "<div class='p66-steps'>"
+            "<span class='p66-chip p66-chip-gray'>MONITORING STATUS: OFFLINE</span>"
+            "<span class='p66-chip p66-chip-amber'>EVENTS: NONE CAPTURED</span>"
+            "</div>"
+            "<div class='p66-note'>The CCTV daemon is not running, so no new security "
+            "events are being captured. Historical events recorded before it stopped "
+            "are unchanged and remain visible below.</div>"
+        )
+
     # --- Incident timeline ---
     st.subheader("Incident Timeline")
     try:
@@ -2041,9 +2893,17 @@ def tab_security(role):
             df = pd.DataFrame(incidents)
             show = df[["incident_id", "first_seen", "event_type", "severity",
                        "camera", "zone", "employee_id", "status"]]
+            if "severity" in show.columns:
+                show = show.style.map(_severity_color, subset=["severity"])
             st.dataframe(show, width="stretch")
         else:
-            st.info("No incidents recorded yet.")
+            st.html(_COMPONENT_CSS + _panel_html(
+                "off", "verified_user",
+                "NO INCIDENT DATA",
+                "No incidents have been recorded yet. Incidents are raised by the "
+                "daemon from real safety-critical events — an empty ledger simply "
+                "means none have occurred."
+            ))
     except Exception as exc:
         st.warning(f"Could not load incidents: {exc}")
 
@@ -2077,7 +2937,13 @@ def tab_security(role):
                          if c in df.columns]
             st.dataframe(df[show_cols], width="stretch")
         else:
-            st.info("No security events match the filters.")
+            st.html(_p66_empty_state_html(
+                "No security events detected",
+                "No events match the current filters. Security events are "
+                "recorded by the daemon from real detections only — an empty "
+                "result is genuine, never a silent failure.",
+                kind="NO_DATA",
+                action="Adjust the filters or wait for the daemon"))
     except Exception as exc:
         st.warning(f"Could not load events: {exc}")
 
@@ -2094,7 +2960,12 @@ def tab_security(role):
             st.write("**Events by type (today):**")
             st.dataframe(by_type.rename("count"), width="stretch")
         else:
-            st.info("No security events today.")
+            st.html(_p66_empty_state_html(
+                "No security events detected today",
+                "No event was recorded for today so far. An empty day means no "
+                "detection occurred — never a silent failure.",
+                kind="NO_DATA",
+                action="Today's detections appear here automatically"))
     except Exception as exc:
         st.warning(f"Could not load analytics: {exc}")
 
@@ -2730,12 +3601,12 @@ def tab_admin_cameras(role: str) -> None:
 
 def tab_settings():
     import config
-    st.header("Settings (read-only)")
-    st.caption("Configuration is environment-driven. All values below are "
-               "read-only — change them in the `.env` file / environment and "
-               "restart. Nothing here silently changes settings, and sensitive "
-               "values (SMTP password, RTSP credentials, dashboard passwords) "
-               "are never shown.")
+    st.html(_p66_page_head_html(
+        "Settings",
+        "Configuration is environment-driven. All values below are read-only — "
+        "change them in the `.env` file / environment and restart. Nothing here "
+        "silently changes settings, and sensitive values (SMTP password, RTSP "
+        "credentials, dashboard passwords) are never shown."))
 
     snapshot = {}
     try:
@@ -2746,18 +3617,27 @@ def tab_settings():
     def _kv(label, value):
         return (label, str(value))
 
-    with st.expander(":material/tune: General", expanded=True):
+    with st.expander(":material/dashboard: Dashboard", expanded=True):
         _show_kv_list([
             _kv("Input source", snapshot.get("input_source", "auto")),
             _kv("Evidence mode", snapshot.get("evidence_mode", config.EVIDENCE_MODE)),
             _kv("Auto-refresh interval (s)", DASH_REFRESH_SEC),
             _kv("Day metrics freshness (s)", DASH_DAY_METRICS_TTL_SEC),
             _kv("Range metrics freshness (s)", DASH_RANGE_METRICS_TTL_SEC),
-            _kv("Login gate enabled",
-                "yes" if _auth_enabled() else "no (open access, local dev)"),
+            _kv("Working window",
+                f"{WORK_SCHEDULE.get('start')} – {WORK_SCHEDULE.get('end')}"),
         ])
 
-    with st.expander(":material/videocam: Camera & Capture", expanded=False):
+    with st.expander(":material/password: Authentication", expanded=False):
+        _show_kv_list([
+            _kv("Login gate enabled",
+                "yes" if _auth_enabled() else "no (open access, local dev)"),
+            _kv("Fail-closed mode", "on" if _auth_fail_closed() else "off"),
+            _kv("Session timeout (min)",
+                DASH_SESSION_MINUTES if DASH_SESSION_MINUTES > 0 else "never"),
+        ])
+
+    with st.expander(":material/videocam: Cameras", expanded=False):
         _show_kv_list([
             _kv("Target FPS per camera", config.TARGET_FPS_PER_CAMERA),
             _kv("Frame stale cutoff (s)", config.FRAME_STALE_SEC),
@@ -2765,17 +3645,15 @@ def tab_settings():
             _kv("Reliability FPS target", snapshot.get("reliability_fps_target")),
         ])
 
-    with st.expander(":material/manage_search: Recognition & Detection", expanded=False):
+    with st.expander(":material/manage_search: Metrics & Detection", expanded=False):
         _show_kv_list([
             _kv("Face-detect size (px)", config.FACE_DETECT_SIZE),
             _kv("Confidence threshold", config.CONF_THRESHOLD),
             _kv("Face similarity threshold", config.FACE_SIMILARITY_THRESHOLD),
         ])
 
-    with st.expander(":material/schedule: Scheduling & Productivity", expanded=False):
+    with st.expander(":material/schedule: Office Schedule", expanded=False):
         _show_kv_list([
-            _kv("Working window",
-                f"{WORK_SCHEDULE.get('start')} – {WORK_SCHEDULE.get('end')}"),
             _kv("Unpaid lunch break", WORK_SCHEDULE.get("lunch")),
             _kv("End-of-day report hour",
                 f"{config.EOD_REPORT_HOUR:02d}:00" if config.EOD_REPORT_HOUR else "disabled"),
@@ -2783,16 +3661,12 @@ def tab_settings():
 
     with st.expander(":material/security: Security & Privacy", expanded=False):
         _show_kv_list([
-            _kv("Dashboard auth", "enabled" if _auth_enabled() else "open (dev)"),
-            _kv("Fail-closed mode", "on" if _auth_fail_closed() else "off"),
-            _kv("Session timeout (min)",
-                DASH_SESSION_MINUTES if DASH_SESSION_MINUTES > 0 else "never"),
             _kv("Evidence retention (days)", snapshot.get("evidence_retention_days")),
             _kv("Correlation window (s)", snapshot.get("correlation_window_sec")),
             _kv("Risk scoring enabled", "yes" if snapshot.get("risk_enabled") else "no"),
         ])
 
-    with st.expander(":material/notifications: Alerts & Notifications", expanded=False):
+    with st.expander(":material/notifications: Alerts", expanded=False):
         alert_rows = [
             _kv("Incident alert dedup (s)", snapshot.get("incident_alert_dedup_sec")),
             _kv("Temporal repeat threshold", snapshot.get("temporal_repeat_threshold")),
@@ -2836,6 +3710,28 @@ def tab_deployment(role: str):
     st.caption("Pre-flight posture and deployment checklist. Run "
                "`python -m src.preflight` on the target host for the full "
                "command-line report with `--json` / `--verbose`.")
+
+    st.html(
+        _COMPONENT_CSS +
+        "<div class='p66-status-card'>"
+        "<div class='p66-status-head'>"
+        "<div>"
+        "<div class='p66-status-title'>Deployment architecture</div>"
+        "<div class='p66-status-sub'>Where each component runs in this "
+        "deployment.</div>"
+        "</div></div>"
+        "<div class='p66-status-grid'>"
+        "<div class='p66-status-item'><div class='p66-st-label'>Dashboard</div>"
+        "<div class='p66-st-value'><span class='p66-dot p66-dot-green'></span>CLOUD</div></div>"
+        "<div class='p66-status-item'><div class='p66-st-label'>CCTV Inference</div>"
+        "<div class='p66-st-value'><span class='p66-dot p66-dot-green'></span>OFFICE / EDGE MACHINE</div></div>"
+        "</div>"
+        "<div class='p66-note'>The dashboard (this app) runs in Streamlit Cloud; "
+        "the <code>main.py</code> CCTV daemon with the connected cameras runs "
+        "on the office / edge machine and writes the live snapshots this "
+        "dashboard reads.</div>"
+        "</div>"
+    )
 
     # --- Honest pre-flight status (read-only) ---
     with st.expander("Pre-flight status (updated on render)", expanded=True):
@@ -2964,12 +3860,11 @@ def _admin_polygon_text(text: str) -> tuple[str | None, str]:
 
 def tab_admin(role: str) -> None:
     """Phase 62 -- Admin Control Center (top-level navigation page)."""
-    st.header("Admin Control Center")
-    st.caption(
+    st.html(_p66_page_head_html(
+        "Admin Control Center",
         "Single persistent place to manage employees, desks (zones), chairs, "
         "the office/lunch schedule and detection thresholds. All admin writes "
-        "are permission-checked and audited."
-    )
+        "are permission-checked and audited."))
     choice = st.radio("p62_admin_sub", _ADMIN_SUB_LABELS,
                       key="p62_admin_sub", horizontal=True,
                       label_visibility="collapsed")
@@ -3775,7 +4670,83 @@ def tab_admin_system(role: str) -> None:
                f"deleted by enable/disable or delete actions.")
 
 
+def _render_landing() -> None:
+    """Part 14: premium public landing (opt-in via ``?view=landing``).
+
+    Marketing hero with honest capabilities -- no fabricated statistics and no
+    deployed-state claims.  'Open Dashboard' clears the landing view and
+    enters the app (the login gate applies when auth is enabled).
+    """
+    _inject_shell_css()
+    explore = st.session_state.get("_p66_explore", False)
+    st.html(
+        _COMPONENT_CSS +
+        "<div class='p66-hero'>"
+        "<div class='p66-hero-brand'><div class='p42-brand-mark'>"
+        "<span class='p42-ic'>security</span></div>"
+        "<div class='p66-hero-name'>AI CCTV Intelligence"
+        "<small>Security Operations Center</small></div></div>"
+        "<div class='p66-hero-tagline'>Smarter Surveillance. <b>Safer Workplaces.</b></div>"
+        "<div class='p66-hero-sub'>One operational view of your office CCTV cameras, "
+        "people presence, productivity and security analytics. The dashboard "
+        "streams from your on-premise CCTV daemon — real observed data, never "
+        "fabricated numbers.</div>"
+        "<div class='p66-illus'>"
+        "<span class='p66-ic-mark'>ILLUSTRATION — stylized SOC visualization, "
+        "not live telemetry</span>"
+        "<span class='p66-cam'><span class='p42-ic'>videocam</span> CCTV</span>"
+        "<div class='p66-ring r1'></div><div class='p66-ring r2'></div>"
+        "<div class='p66-ring r3'></div><div class='p66-core'></div>"
+        "<div class='p66-dot' style='left:28%; top:32%'></div>"
+        "<div class='p66-dot' style='left:63%; top:24%'></div>"
+        "<div class='p66-dot' style='left:70%; top:64%'></div>"
+        "<div class='p66-dot' style='left:34%; top:66%'></div>"
+        "<div class='p66-dot' style='left:50%; top:46%'></div>"
+        "</div>"
+        "</div>"
+    )
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button(":material/login: Open Dashboard", key="p66_open_dashboard",
+                     type="primary", use_container_width=True):
+            st.query_params.clear()
+            st.rerun()
+    with c2:
+        if st.button(":material/travel_explore: Explore Capabilities",
+                     key="p66_explore", use_container_width=True):
+            st.session_state["_p66_explore"] = not explore
+            st.rerun()
+
+    if explore:
+        st.html(
+            _COMPONENT_CSS +
+            "<div class='p66-feat'>"
+            "<div class='p66-feat-card'><div class='p66-feat-icon'>add_a_photo</div>"
+            "<div class='p66-feat-title'>AI-Powered Detection</div>"
+            "<div class='p66-feat-desc'>Real-time person, face and phone-usage "
+            "detection from your office cameras.</div></div>"
+            "<div class='p66-feat-card'><div class='p66-feat-icon'>monitor_heart</div>"
+            "<div class='p66-feat-title'>Real-Time Monitoring</div>"
+            "<div class='p66-feat-desc'>Live presence, camera health and incident "
+            "feeds on a single SOC dashboard.</div></div>"
+            "<div class='p66-feat-card'><div class='p66-feat-icon'>group</div>"
+            "<div class='p66-feat-title'>Employee Intelligence</div>"
+            "<div class='p66-feat-desc'>Per-employee activity, productivity and "
+            "wellbeing metrics from observed states only.</div></div>"
+            "<div class='p66-feat-card'><div class='p66-feat-icon'>shield</div>"
+            "<div class='p66-feat-title'>Enterprise Security</div>"
+            "<div class='p66-feat-desc'>Incident timeline, evidence mode and "
+            "investigation workbench for your security team.</div></div>"
+            "</div>"
+        )
+    _render_footer("visitor")
+
+
 def main():
+    if st.query_params.get("view") == "landing":
+        _render_landing()
+        return
+
     role = do_auth()
     if not role:
         return
@@ -3789,6 +4760,14 @@ def main():
                     "offline": "Daemon offline"}[snap["kind"]]
         st.html(
             _COMPONENT_CSS +
+            "<div class='p42-sb-brand'>"
+            "<div class='p42-brand-mark'><span class='p42-ic'>security</span></div>"
+            "<div><div class='p42-sb-name'>AI CCTV Intelligence</div>"
+            "<div class='p42-sb-sub'>Security Operations Center</div></div>"
+            "</div>"
+        )
+        st.html(
+            _COMPONENT_CSS +
             "<div class='p42 p42-session-card'>"
             f"<div class='p42-s-row'><span>Role</span>"
             f"<span>{'Admin' if role == 'admin' else 'Viewer'}</span></div>"
@@ -3797,12 +4776,19 @@ def main():
             "</div>"
         )
         st.divider()
-        st.markdown(
-            "<span class='p42-nav-legend'><b>MONITORING</b> Dashboard · Live &nbsp;·&nbsp; "
-            "<b>PEOPLE</b> Employees &nbsp;·&nbsp; <b>SECURITY</b> Security · Reports · "
-            "Analytics &nbsp;·&nbsp; <b>INFRASTRUCTURE</b> Cameras · Admin · Settings · "
-            "Deploy</span>",
-            unsafe_allow_html=True,
+        st.html(
+            _COMPONENT_CSS +
+            "<div class='p42-sb-groups'>"
+            "<div><div class='p42-sb-group-label'>Monitoring</div>"
+            "<div class='p42-sb-item'><b>Dashboard</b> · Live Monitoring</div></div>"
+            "<div><div class='p42-sb-group-label'>People</div>"
+            "<div class='p42-sb-item'>Employees</div></div>"
+            "<div><div class='p42-sb-group-label'>Security</div>"
+            "<div class='p42-sb-item'>Security · Reports · Analytics</div></div>"
+            "<div><div class='p42-sb-group-label'>Infrastructure</div>"
+            "<div class='p42-sb-item'>Cameras · Admin Control Center · Settings · "
+            "Deploy / System Check</div></div>"
+            "</div>"
         )
         choice = st.radio("cctv_nav", _NAV_LABELS, key="p42_nav",
                           label_visibility="collapsed")
@@ -3848,11 +4834,9 @@ def main():
             tab_deployment(role)
     except Exception as exc:  # Phase 65: never expose a raw traceback in the UI
         _render_error_card(
-            "Something went wrong while rendering this page",
-            f"An unexpected error occurred ({type(exc).__name__}). The incident "
-            "was logged internally; use the diagnostic id to correlate it. "
-            "Refresh now to retry."
-        )
+            "Something went wrong",
+            f"An unexpected error occurred while rendering this page "
+            f"({type(exc).__name__}).")
 
     _render_footer(role)
 
