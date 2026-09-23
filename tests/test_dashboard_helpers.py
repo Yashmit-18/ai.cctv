@@ -9,6 +9,7 @@ import pickle
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from app import (
     _faces_dir,
@@ -243,3 +244,25 @@ def test_get_readonly_connection_concurrent_first_run(tmp_path):
          .execute("SELECT name FROM sqlite_master WHERE type='table'"))
     }
     assert {"employees", "activity_logs"} <= tables
+
+
+def test_open_readonly_connection_unshared_closes_normally(tmp_path):
+    """64D: the per-call opener returns a closeable (non-shared) handle.
+
+    Only the session-shared handle must survive ``close()`` calls.  The fresh
+    opener is used by the cached metric helpers and by callers outside a
+    Streamlit runtime; those handles must close normally and not leak.
+    """
+    import sqlite3
+
+    import src.database as sdb
+    from app import _open_readonly_connection
+
+    db = tmp_path / "unshared" / "sessions.db"
+    conn = _open_readonly_connection(str(db))
+    assert conn is not None
+    # bootstrap schema so the query below has a table to run against
+    conn.execute("SELECT 1")  # sanity: usable
+    conn.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")  # physically closed, unlike a shared handle

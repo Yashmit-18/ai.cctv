@@ -762,6 +762,15 @@ DASH_FAIL_CLOSED = os.getenv("CCTV_DASH_FAIL_CLOSED", "1") == "1"
 # is invalidated and the user must sign in again.  A value <= 0 disables expiry
 # (keeps the previous persistent-session behavior for local development).
 DASH_SESSION_MINUTES = float(os.getenv("CCTV_DASH_SESSION_MINUTES", "15"))
+# Read-query cache TTLs (Phase 64D).  These only bound how often the dashboard
+# re-runs its read-only metric queries on a fresh short-lived connection.  The
+# live-snapshot file read is NEVER cached, so live status always stays fresh at
+# DASH_REFRESH_SEC.  The day-aggregate defaults to 15 s (it feeds the KPIs and
+# productivity chart) and the full-range aggregate to 60 s (heaviest query,
+# used by Analytics/Reports).  Both are read-only historical aggregates; admin
+# mutations already invalidate the metrics caches on the paths that changed.
+DASH_DAY_METRICS_TTL_SEC = int(os.getenv("CCTV_DASH_DAY_METRICS_TTL", "15"))
+DASH_RANGE_METRICS_TTL_SEC = int(os.getenv("CCTV_DASH_RANGE_METRICS_TTL", "60"))
 
 # ============================================================
 # EMAIL RETRY  (Phase 13)

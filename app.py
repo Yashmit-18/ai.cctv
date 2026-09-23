@@ -36,7 +36,9 @@ import streamlit as st
 from config import (
     DASH_ADMIN_PASS,
     DASH_AUTH_ENABLED,
+    DASH_DAY_METRICS_TTL_SEC,
     DASH_FAIL_CLOSED,
+    DASH_RANGE_METRICS_TTL_SEC,
     DASH_REFRESH_SEC,
     DASH_ROLE_VIEWER,
     DASH_SESSION_MINUTES,
@@ -121,8 +123,24 @@ def _probe_schema(db_file: Path) -> bool:
         probe.close()
 
 
-def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection | None:
-    """Return a connection that is safe against the daemon's concurrent writes.
+class _ReadonlyConnection(sqlite3.Connection):
+    """Session-scoped read-only SQLite handle (Phase 64D).
+
+    ``close()`` is a no-op for handles marked ``_cctv_shared``: the shared
+    handle is opened once per Streamlit session and reused across every page
+    navigation, so the dashboard no longer opens and probes a fresh SQLite
+    connection on every render.  Unshared handles (the per-call fallback used
+    by cache helpers and by callers outside a Streamlit runtime) close
+    normally and never leak.
+    """
+
+    def close(self) -> None:
+        if not getattr(self, "_cctv_shared", False):
+            super().close()
+
+
+def _open_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection | None:
+    """Open ONE fresh read-only connection (used by short-lived callers).
 
     A plain connection with ``PRAGMA query_only`` is used instead of a
     ``file:...?mode=ro&immutable=1`` URI: read-only URI connections do not
@@ -136,6 +154,10 @@ def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection | None
     before opening the read-only handle.  This keeps the dashboard from
     displaying a spurious "Database unavailable." state on a newly booted
     cloud instance while preserving the normal read-only access pattern.
+
+    Callers that keep the handle across renders are expected to use
+    :func:`get_readonly_connection` instead, which shares ONE instance per
+    Streamlit session and never requires the caller to close it.
     """
     global _LAST_DB_ERROR
     _LAST_DB_ERROR = ""
@@ -168,7 +190,8 @@ def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection | None
                     logging.getLogger("cctv.dashboard").warning(_LAST_DB_ERROR)
                     return None
     try:
-        conn = sqlite3.connect(str(db_file), check_same_thread=False, timeout=2)
+        conn = sqlite3.connect(str(db_file), factory=_ReadonlyConnection,
+                               check_same_thread=False, timeout=2)
         conn.execute("PRAGMA query_only=ON")
         conn.row_factory = sqlite3.Row
         return conn
@@ -178,14 +201,46 @@ def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection | None
         return None
 
 
-@st.cache_data(ttl=5, show_spinner=False)
+def get_readonly_connection(db_path: str = DB_PATH) -> sqlite3.Connection | None:
+    """Return the session's shared read-only handle.
+
+    The handle is opened once per Streamlit session (first render) and reused
+    by every page and every navigation, which removes the per-render open /
+    schema-probe / close cycle that dominated dashboard page turns on slow
+    filesystems (e.g. Streamlit Cloud GFFS).  Read-only handles are safe for a
+    single Streamlit session because a session only ever runs one script turn
+    on one thread; the daemon's writes still arrive through separate write
+    connections and are visible through WAL.  Callers never close this handle
+    (``close()`` is a no-op on shared handles).
+
+    Outside a running Streamlit runtime (unit tests, tooling) this falls back
+    to a fresh per-call connection with the same bootstrap semantics.
+    """
+    if not st.runtime.exists():
+        return _open_readonly_connection(db_path)
+    key = f"_cctv_readonly_conn_{db_path}"
+    conn = st.session_state.get(key)
+    if conn is None:
+        conn = _open_readonly_connection(db_path)
+        if conn is not None:
+            conn._cctv_shared = True
+            try:
+                st.session_state[key] = conn
+            except Exception:  # pragma: no cover - defensive
+                conn._cctv_shared = False
+                conn.close()
+                return _open_readonly_connection(db_path)
+    return conn
+
+
+@st.cache_data(ttl=DASH_DAY_METRICS_TTL_SEC, show_spinner=False)
 def cached_day_metrics(day_str: str) -> pd.DataFrame:
-    """Cached per-employee metrics for a day (5 s TTL tolerates daemon writes)."""
+    """Cached per-employee metrics for a day (TTL tolerates daemon writes)."""
     return _day_metrics_unp(day_str)
 
 
 def _day_metrics_unp(day_str: str) -> pd.DataFrame:
-    conn = get_readonly_connection()
+    conn = _open_readonly_connection()
     if conn is None:
         return pd.DataFrame()
     try:
@@ -198,13 +253,13 @@ def _day_metrics_unp(day_str: str) -> pd.DataFrame:
     return _to_frame(rows)
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=DASH_RANGE_METRICS_TTL_SEC, show_spinner=False)
 def cached_range_metrics(start_str: str, end_str: str) -> pd.DataFrame:
     return _range_metrics_unp(start_str, end_str)
 
 
 def _range_metrics_unp(start_str: str, end_str: str) -> pd.DataFrame:
-    conn = get_readonly_connection()
+    conn = _open_readonly_connection()
     if conn is None:
         return pd.DataFrame()
     try:
@@ -2500,6 +2555,8 @@ def tab_settings():
             _kv("Input source", snapshot.get("input_source", "auto")),
             _kv("Evidence mode", snapshot.get("evidence_mode", config.EVIDENCE_MODE)),
             _kv("Auto-refresh interval (s)", DASH_REFRESH_SEC),
+            _kv("Day metrics freshness (s)", DASH_DAY_METRICS_TTL_SEC),
+            _kv("Range metrics freshness (s)", DASH_RANGE_METRICS_TTL_SEC),
             _kv("Login gate enabled",
                 "yes" if _auth_enabled() else "no (open access, local dev)"),
         ])

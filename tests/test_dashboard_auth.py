@@ -92,6 +92,38 @@ def test_viewer_cannot_obtain_admin(monkeypatch):
 
 
 # ----------------------------------------------------------------------
+# Phase 64C -- admin username is configurable (email-style) + credential
+# edge cases.  NEVER use real deployment credentials in tests; the real
+# admin password lives only in Streamlit Secrets.
+# ----------------------------------------------------------------------
+
+def test_email_style_admin_username_grants_admin(monkeypatch):
+    """64C: the admin username is a config value; email-style works."""
+    monkeypatch.setattr(app, "DASH_ADMIN_PASS", "64c-admin-dummy")
+    monkeypatch.setattr(app, "DASH_VIEWER_PASS", "")
+    monkeypatch.setattr(app, "DASH_USERNAME", "admin@example.local")
+    assert app._authenticate("admin@example.local", "64c-admin-dummy") == "admin"
+    assert app._authenticate("admin@example.local", "wrong-pw") == ""
+    assert app._authenticate("someone@else.local", "64c-admin-dummy") == ""
+
+
+def test_empty_username_rejected_with_valid_password(monkeypatch):
+    """64C: blank username (admin path) is never admin."""
+    monkeypatch.setattr(app, "DASH_ADMIN_PASS", "64c-admin-dummy")
+    monkeypatch.setattr(app, "DASH_VIEWER_PASS", "64c-viewer-dummy")
+    monkeypatch.setattr(app, "DASH_USERNAME", "admin@example.local")
+    assert app._authenticate("", "64c-admin-dummy") == ""
+
+
+def test_empty_password_rejected_with_valid_username(monkeypatch):
+    """64C: blank password (admin path) is never admin."""
+    monkeypatch.setattr(app, "DASH_ADMIN_PASS", "64c-admin-dummy")
+    monkeypatch.setattr(app, "DASH_VIEWER_PASS", "64c-viewer-dummy")
+    monkeypatch.setattr(app, "DASH_USERNAME", "admin@example.local")
+    assert app._authenticate("admin@example.local", "") == ""
+
+
+# ----------------------------------------------------------------------
 # H1 - fail-closed must block even when no password is configured
 # ----------------------------------------------------------------------
 

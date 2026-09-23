@@ -101,3 +101,33 @@ def test_sidebar_navigation_switches_every_page_without_exception():
         nav.set_value(option)
         at.run()
         assert not at.exception, (option, at.exception)
+
+
+def test_readonly_connection_is_shared_across_pages_in_session():
+    """64D: page turns share ONE read-only SQLite handle per session.
+
+    Navigation must reuse the same handle (no per-render open / schema-probe /
+    close cycle) and the handle must survive the page-code ``close()`` calls.
+    """
+    from config import DB_PATH
+
+    at = _app()
+    at.run()
+    assert not at.exception, at.exception
+    nav = at.sidebar.radio[0]
+    key = f"_cctv_readonly_conn_{DB_PATH}"
+    employees = next(o for o in nav.options if "Employees" in o)
+    settings = next(o for o in nav.options if "Settings" in o)
+
+    nav.set_value(employees)
+    at.run()
+    assert not at.exception, at.exception
+    c1 = at.session_state[key]
+
+    nav.set_value(settings)
+    at.run()
+    assert not at.exception, at.exception
+    c2 = at.session_state[key]
+
+    assert c1 is c2, "navigation must reuse the session-shared read-only handle"
+    assert c2.execute("SELECT COUNT(*) FROM employees").fetchone() is not None

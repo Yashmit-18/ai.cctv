@@ -520,6 +520,8 @@ CCTV_EOD_HOUR=19             # 0-23; empty/"none" disables scheduled reports
 
 ```dotenv
 CCTV_DASH_REFRESH=5            # live-tab auto-refresh interval (s)
+CCTV_DASH_DAY_METRICS_TTL=15   # read-only day-metrics cache TTL (s); live reads never cached
+CCTV_DASH_RANGE_METRICS_TTL=60 # read-only range-metrics cache TTL (s)
 CCTV_DASH_AUTH=1               # 1 = login gate, 0 = explicit open dev mode
 CCTV_DASH_FAIL_CLOSED=1        # default 1: no credentials configured -> access
                                # is BLOCKED (never silently open as admin)

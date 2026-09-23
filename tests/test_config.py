@@ -93,3 +93,45 @@ def test_eod_hour_env_ignores_junk(reloaded):
     cfg = reloaded({"CCTV_EOD_HOUR": "banana"})
     assert cfg.EOD_REPORT_HOUR is None
     assert cfg.validate_config() == []
+
+
+def test_dashboard_credentials_read_from_env(reloaded):
+    """64C: CCTV_DASH_USER/CCTV_DASH_PASS map onto the auth constants.
+
+    The admin username is a plain config value (no fixed 'admin' hardcode);
+    the admin password comes exclusively from environment / Streamlit
+    Secrets, never from source.  Dummy values only.
+    """
+    cfg = reloaded({
+        "CCTV_DASH_AUTH": "1",
+        "CCTV_DASH_USER": "admin@example.local",
+        "CCTV_DASH_PASS": "64c-dummy-pass",
+        "CCTV_DASH_VIEWER_PASS": "64c-dummy-viewer",
+    })
+    assert cfg.DASH_AUTH_ENABLED is True
+    assert cfg.DASH_USERNAME == "admin@example.local"
+    assert cfg.DASH_ADMIN_PASS == "64c-dummy-pass"
+    assert cfg.DASH_VIEWER_PASS == "64c-dummy-viewer"
+
+
+def test_dashboard_username_defaults_to_admin(reloaded):
+    """64C: with no CCTV_DASH_USER the existing default stays 'admin'."""
+    cfg = reloaded({"CCTV_DASH_PASS": "64c-dummy-pass"})
+    assert cfg.DASH_USERNAME == "admin"
+
+
+def test_dashboard_metrics_cache_ttl_defaults(reloaded):
+    """64D: modest read-only defaults for the metric cache TTL knobs."""
+    cfg = reloaded({})
+    assert isinstance(cfg.DASH_DAY_METRICS_TTL_SEC, int)
+    assert isinstance(cfg.DASH_RANGE_METRICS_TTL_SEC, int)
+    assert cfg.DASH_DAY_METRICS_TTL_SEC == 15
+    assert cfg.DASH_RANGE_METRICS_TTL_SEC == 60
+
+
+def test_dashboard_metrics_cache_ttl_configurable(reloaded):
+    """64D: the metric cache TTL knobs read from the environment."""
+    cfg = reloaded({"CCTV_DASH_DAY_METRICS_TTL": "30",
+                    "CCTV_DASH_RANGE_METRICS_TTL": "120"})
+    assert cfg.DASH_DAY_METRICS_TTL_SEC == 30
+    assert cfg.DASH_RANGE_METRICS_TTL_SEC == 120
