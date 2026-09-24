@@ -79,12 +79,16 @@ immediate next action an admin performs after uploading.
 
 ## 4. Important distinction
 
-**CLOUD ROOT CAUSE NOT VERIFIED.**
+**CLOUD ROOT CAUSE NOT VERIFIED** for the *original* incident build — no
+archived logs from the pre-fix deployment were available, so the section 3
+attribution is derived from reading the exact code, not from Cloud telemetry.
 
-No access was available to the deployed Streamlit Cloud application or its
-logs during this investigation. Everything in section 3 is derived from
-reading the exact code, not from Cloud telemetry. The Cloud issue is **not**
-declared fixed.
+The **fixed deployment (commit `a783f8d`) has since been exercised on
+Streamlit Cloud and verified end-to-end** (full results in section 17): the
+upload → save → validate flow completed with **no "Connection lost"**, real
+faces returned ENROLLED, non-faces returned NO_FACE, and the Cloud logs were
+clean. The shipped fix is therefore Cloud-verified; only the historical
+incident's attribution remains code-level.
 
 ## 5. Exact implementation fix
 
@@ -242,12 +246,35 @@ storage; the one throwaway file was removed and `data/faces/` restored).
 
 ## 17. Cloud validation status
 
-**CLOUD NOT VERIFIED.**
+**CLOUD VERIFIED** — on the **deployed commit `a783f8d`** (Streamlit Cloud,
+on-Cloud manual test).
 
-The deployed Streamlit Cloud app was not tested and its logs were not
-inspected. Local success does not prove the Cloud issue is resolved; only a
-deployed test of the upload → save → validate flow can confirm the Cloud
-behaviour.
+| Area | Item | Result |
+| --- | --- | --- |
+| AUTH | Fresh/incognito login-only screen | PASS |
+| AUTH | Admin login | PASS |
+| AUTH | Admin logout → clean login-only screen | PASS |
+| AUTH | Viewer login | PASS |
+| AUTH | Viewer logout → clean login-only screen | PASS |
+| UPLOAD | Employees page opens | PASS |
+| UPLOAD | Add employee works | PASS |
+| UPLOAD | Small JPG upload | PASS |
+| UPLOAD | Save Photo | PASS |
+| UPLOAD | "Connection lost" appears | **NO** |
+| UPLOAD | Validate Enrollment | PASS |
+| UPLOAD | Real face → ENROLLED | PASS |
+| UPLOAD | Non-face image → NO_FACE | PASS |
+| LOGS | Deployment starts successfully | PASS |
+| LOGS | No traceback during login | PASS |
+| LOGS | No traceback during upload | PASS |
+| LOGS | No traceback during enrollment | PASS |
+| LOGS | No libGL/OpenCV error | PASS |
+| LOGS | No database error | PASS |
+| PAGES | Dashboard / Live Monitoring / Employees / Security / Reports / Analytics / Cameras / Admin Control Center / Settings / Deploy-System Check | ALL PASS |
+| | Problems | NONE |
+
+The original "Connection lost on employee upload" symptom did not reproduce
+on the deployed fix.
 
 ## 18. Security / RBAC
 
@@ -290,8 +317,8 @@ exercised only for the ENROLLED and NO_FACE paths.
 
 ## 22. NOT VALIDATED
 
-- The actual Streamlit Cloud deployment (no deploy access).
-- InsightFace **first-use model download on a cold Cloud instance**.
+- InsightFace **first-use model download on a cold Cloud instance** (the
+  deployed test ran after the model was already warm).
 - MULTIPLE_FACES / LOW_QUALITY / INVALID_IMAGE against the real model.
 - Concurrent multi-session Cloud behaviour and the Cloud resource envelope
   (RAM headroom while `~300 MB` of onnx runtime is resident).
@@ -320,5 +347,7 @@ exercised only for the ENROLLED and NO_FACE paths.
   the result simply takes longer.
 - Enrollment state is only refreshed by Validate or by daemon startup; a fast
   "cached status" read is shown until then.
-- The real Cloud incident remains **CLOUD NOT VERIFIED** until the deployed
-  app is exercised end-to-end.
+- The original incident's attribution stays code-level (no archived logs for
+  the pre-fix build); the shipped fix (`a783f8d`) is Cloud-verified in
+  section 17 — **all on-Cloud checks PASS, "Connection lost" did not appear,
+  Cloud logs CLEAN, no problems reported**.
