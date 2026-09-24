@@ -343,7 +343,11 @@ def test_performance_boundaries_intact():
     assert "@st.cache_data(ttl=DASH_RANGE_METRICS_TTL_SEC" in src
     assert "def get_readonly_connection" in src
     assert "load_live_state" in src            # live snapshot stays uncached
-    assert "import cv2" not in src             # no module-level OpenCV import
+    # No MODULE-LEVEL OpenCV import (startup cost).  A lazy, in-function
+    # ``import cv2`` is allowed: _validate_enrollment_bytes() decodes bytes at
+    # upload time, and the face model via src.face_registry is also deferred.
+    top_level = (l for l in src.splitlines() if l and not l[0].isspace())
+    assert not any("import cv2" in l for l in top_level)
 
 
 # ----------------------------------------------------------------------

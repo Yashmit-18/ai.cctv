@@ -14,6 +14,7 @@ Locks in three confirmed dashboard-auth defects:
         handler meant to survive audit-write failures.
 """
 
+import inspect
 import logging
 from unittest.mock import MagicMock
 
@@ -219,3 +220,221 @@ def test_audit_report_export_success_path_audits(monkeypatch):
     app._audit_report_export("daily.xlsx", "viewer")
     assert writes, "audit row expected on success"
     conn.close.assert_called_once()
+
+
+# ======================================================================
+# Phase 66B -- auth RENDERING gate regression (mutually exclusive states)
+# ----------------------------------------------------------------------
+# Root cause fixed: ``st.fragment(run_every=...)`` auto-refresh timers kept
+# firing in the deployed (Cloud) session AFTER logout and re-painted the
+# authenticated page bodies (Live Overview KPIs, camera cards, security
+# ledger) NEXT TO the freshly rendered login form, using the stale ``role``
+# captured in the fragment closure.  The unauthenticated page can now never
+# render authenticated content because:
+#   * logout/expiry clears EVERY session marker via ``_clear_auth_session``;
+#   * the fragment-wrapped tab bodies re-check ``_current_role()`` on every
+#     execution and render nothing when no valid session exists.
+# ======================================================================
+
+_APP = __import__("pathlib").Path(__file__).resolve().parent.parent / "app.py"
+_AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
+
+
+def _auth_env(monkeypatch, admin="ph66-admin", viewer="ph66-viewer",
+              minutes: float = 15.0):
+    """Enable auth for the AppTest-executed app.py copy AND the test module.
+
+    ``AppTest.from_file`` re-executes ``app.py`` (a fresh ``from config
+    import``), so the config module attributes must be patched for the app
+    script; the ``app`` module attributes are patched too for unit helpers.
+    """
+    import config
+    monkeypatch.setattr(config, "DASH_AUTH_ENABLED", True)
+    monkeypatch.setattr(config, "DASH_ADMIN_PASS", admin)
+    monkeypatch.setattr(config, "DASH_VIEWER_PASS", viewer)
+    monkeypatch.setattr(config, "DASH_USERNAME", "admin")
+    monkeypatch.setattr(config, "DASH_FAIL_CLOSED", True)
+    monkeypatch.setattr(config, "DASH_SESSION_MINUTES", minutes)
+    monkeypatch.setattr(app, "DASH_AUTH_ENABLED", True)
+    monkeypatch.setattr(app, "DASH_ADMIN_PASS", admin)
+    monkeypatch.setattr(app, "DASH_VIEWER_PASS", viewer)
+    monkeypatch.setattr(app, "DASH_USERNAME", "admin")
+    monkeypatch.setattr(app, "DASH_FAIL_CLOSED", True)
+    monkeypatch.setattr(app, "DASH_SESSION_MINUTES", minutes)
+
+
+def _html_body(at) -> str:
+    """Concatenated html-block markup WITHOUT the always-shipped <style> block.
+
+    Every ``st.html`` output embeds ``_COMPONENT_CSS`` (a stylesheet whose
+    selectors legitimately mention p42-topbar / p42-session-card / etc.), so
+    content assertions must only look at the markup after ``</style>``.
+    """
+    parts = []
+    for _el in at.get("html"):
+        try:
+            raw = str(_el.proto.body)
+            if "</style>" in raw:
+                raw = raw.split("</style>")[-1]
+            parts.append(raw)
+        except AttributeError:  # pragma: no cover - defensive
+            continue
+    return "\n".join(parts)
+
+
+def _ss_get(_at, key: str, default=None):
+    """SafeSessionState has no .get(); read via in / [] instead."""
+    return _at.session_state[key] if key in _at.session_state else default
+
+
+def _login(_at, username: str, password: str):
+    fields = {str(w.label): w for w in _at.text_input}
+    if "Username" in fields:
+        fields["Username"].set_value(username)
+    fields["Password"].set_value(password)
+    [b for b in _at.button if str(b.label) == "Sign In \u2192"][0].click()
+    _at.run()
+    _at.run()
+    return _at
+
+
+def _logout(_at):
+    [b for b in _at.sidebar.button if "Log out" in str(b.label)][0].click()
+    _at.run()
+    return _at
+
+
+def test_unauth_renders_login_ui_only_no_admin_shell(monkeypatch, tmp_path):
+    """STATE A: fresh unauthenticated visit shows ONLY the login screen."""
+    _auth_env(monkeypatch)
+    monkeypatch.setenv("CCTV_LIVE_STATE_FILE", str(tmp_path / "missing.json"))
+    at = _AppTest.from_file(str(_APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+
+    # Login UI rendered exactly once.
+    assert len({str(b.label) for b in at.button if "Sign In" in str(b.label)}) == 1
+    assert "Welcome Back" in _html_body(at)
+
+    # No authenticated application shell.
+    assert not at.sidebar.radio                    # no navigation
+    assert not at.metric                           # no KPIs
+    body = _html_body(at)
+    assert "Admin Control Center" not in body      # no admin nav / page
+    assert "p42-topbar" not in body                # no topbar
+    assert "p42-session-card" not in body          # no Role/System card
+    assert "Live Overview" not in body             # no dashboard content
+    assert "Role</span><span>Admin" not in body    # no stale admin identity
+
+
+def test_admin_login_transitions_to_authenticated_state(monkeypatch, tmp_path):
+    """STATE B (admin): credentials take a fresh session to the app."""
+    _auth_env(monkeypatch)
+    monkeypatch.setenv("CCTV_LIVE_STATE_FILE", str(tmp_path / "missing.json"))
+    at = _AppTest.from_file(str(_APP), default_timeout=90).run()
+    _login(at, "admin", "ph66-admin")
+    assert not at.exception, at.exception
+    assert _ss_get(at, "cctv_role") == "admin"
+    assert len(at.sidebar.radio) == 1               # navigation returned
+    assert "Live Overview" in " ".join(str(h.value) for h in at.header)
+    body = _html_body(at)
+    assert "p42-session-card" in body
+    assert "Role</span><span>Admin" in body
+
+
+def test_viewer_login_transitions_to_viewer_role(monkeypatch, tmp_path):
+    """STATE B (viewer): viewer login is authenticated as read-only viewer."""
+    _auth_env(monkeypatch)
+    monkeypatch.setenv("CCTV_LIVE_STATE_FILE", str(tmp_path / "missing.json"))
+    at = _AppTest.from_file(str(_APP), default_timeout=90).run()
+    _login(at, "", "ph66-viewer")
+    assert not at.exception, at.exception
+    assert _ss_get(at, "cctv_role") == "viewer"
+    assert len(at.sidebar.radio) == 1
+
+
+def test_admin_logout_clears_all_markers_and_content(monkeypatch, tmp_path):
+    """Logout: no session markers remain; login renders again; no admin UI."""
+    _auth_env(monkeypatch)
+    monkeypatch.setenv("CCTV_LIVE_STATE_FILE", str(tmp_path / "missing.json"))
+    at = _AppTest.from_file(str(_APP), default_timeout=90).run()
+    _login(at, "admin", "ph66-admin")
+    _logout(at)
+    assert not at.exception, at.exception
+
+    for key in ("cctv_role", "cctv_login_ts"):
+        assert key not in at.session_state
+    assert _ss_get(at, "_p66_login_viewer") is None
+
+    assert not at.sidebar.radio
+    assert not at.metric
+    body = _html_body(at)
+    assert "Admin Control Center" not in body
+    assert "p42-topbar" not in body
+    assert "p42-session-card" not in body
+    assert "Role</span><span>Admin" not in body
+    assert "Live Overview" not in body
+    assert any("Welcome Back" in t for t in body.split()) or \
+        any("Sign In \u2192" in str(b.label) for b in at.button)
+
+
+def test_viewer_logout_clears_all_markers_and_content(monkeypatch, tmp_path):
+    """Viewer logout is symmetrical: clean unauthenticated login only."""
+    _auth_env(monkeypatch)
+    monkeypatch.setenv("CCTV_LIVE_STATE_FILE", str(tmp_path / "missing.json"))
+    at = _AppTest.from_file(str(_APP), default_timeout=90).run()
+    _login(at, "", "ph66-viewer")
+    _logout(at)
+    assert not at.exception, at.exception
+    assert "cctv_role" not in at.session_state
+    assert "cctv_login_ts" not in at.session_state
+    assert not at.sidebar.radio
+    assert not at.metric
+
+
+def test_session_expiry_returns_to_clean_login_state(monkeypatch, tmp_path):
+    """Expired session -> markers purged, login shown, only one login UI."""
+    _auth_env(monkeypatch, minutes=15.0)
+    monkeypatch.setenv("CCTV_LIVE_STATE_FILE", str(tmp_path / "missing.json"))
+    at = _AppTest.from_file(str(_APP), default_timeout=90).run()
+    _login(at, "admin", "ph66-admin")
+    assert _ss_get(at, "cctv_role") == "admin"
+
+    # Backdate the login timestamp past the session window, then rerun: the
+    # session MUST return to the clean unauthenticated state.
+    at.session_state["cctv_login_ts"] = __import__("time").time() - 3600
+    at.run()
+    assert not at.exception, at.exception
+    assert "cctv_role" not in at.session_state
+    assert "cctv_login_ts" not in at.session_state
+    assert not at.sidebar.radio
+    assert any("Session expired" in str(w.value) for w in at.warning)
+    sign_ins = [b for b in at.button if "Sign In" in str(b.label)]
+    assert len(sign_ins) == 1                       # login form only once
+
+
+def test_fragment_wrapped_tab_bodies_are_auth_gated():
+    """Auto-refresh fragments must no-op when unauthenticated.
+
+    This is the Cloud-vector regression: a ``st.fragment(run_every=...)``
+    timer survives logout and re-executes these bodies; without the gate it
+    re-paints authenticated content next to the login form.
+    """
+    for fn in (app.tab_live_overview, app.page_live_monitoring,
+               app.tab_security):
+        src = inspect.getsource(fn)
+        assert "if not _current_role():\n        return" in src, fn.__name__
+
+
+def test_current_role_and_clear_auth_session_semantics(monkeypatch):
+    """Session helpers: auth-disabled -> admin; empty -> ''; clears all."""
+    # Suite default runs with CCTV_DASH_AUTH=0 -> open dev mode grants admin.
+    assert app._auth_enabled() is False
+    assert app._current_role() == "admin"
+    assert app._clear_auth_session() is None        # idempotent
+
+    # Auth enabled but no session -> genuinely unauthenticated ('').
+    _auth_env(monkeypatch)
+    assert app._current_role() == ""
+
+    for key in ("cctv_role", "cctv_login_ts", "_p66_login_viewer"):
+        assert key in app._AUTH_SESSION_KEYS

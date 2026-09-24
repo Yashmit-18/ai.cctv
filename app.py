@@ -343,6 +343,55 @@ _ENROLL_COLOR = {
     "INVALID_IMAGE": "#e74c3c",
 }
 
+# Upload validation (fast, model-free).  The stored filename is always the
+# canonical employee id + a canonical extension, never the uploaded name.
+_ENROLL_ALLOWED_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp")
+_ENROLL_IMAGE_MAX_BYTES = 10 * 1024 * 1024          # 10 MB cap
+_ENROLL_IMAGE_MAX_PIXELS = 24_000_000               # ~24 MP cap
+_FAMILY_OF_SUFFIX = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "bmp": "bmp"}
+_FAMILY_CANON_EXT = {"jpeg": ".jpg", "png": ".png", "bmp": ".bmp"}
+_MAGIC_BY_FAMILY = {
+    "jpeg": b"\xff\xd8\xff",
+    "png": b"\x89PNG\r\n\x1a\n",
+    "bmp": b"BM",
+}
+
+
+def _validate_enrollment_bytes(data: bytes, filename: str) -> tuple[str, str]:
+    """Check uploaded image bytes without loading the face model.
+
+    Returns ``(canonical_ext, "")`` on success or ``("", message)`` on
+    rejection.  Checks: empty, size cap, whitelisted type, magic bytes
+    matching the stated type, OpenCV decode-ability, sane dimensions.
+    ``filename`` is used only to derive the claimed type; the stored name is
+    canonicalised by the caller.
+    """
+    if not data:
+        return "", "The uploaded file is empty."
+    if len(data) > _ENROLL_IMAGE_MAX_BYTES:
+        return "", (f"Image is too large ({len(data) / 1048576:.1f} MB); "
+                    f"limit {_ENROLL_IMAGE_MAX_BYTES // 1048576} MB.")
+    suffix = Path(filename).suffix.lower()
+    family = _FAMILY_OF_SUFFIX.get(suffix.lstrip("."))
+    if family is None:
+        return "", f"Unsupported image type '{suffix or '(none)'}'. Use JPG/PNG/BMP."
+    if not data.startswith(_MAGIC_BY_FAMILY[family]):
+        return "", (f"'{Path(filename).name}' is not a valid {family.upper()} file "
+                    "(content does not match its name).")
+    try:
+        import cv2 as _cv2
+        import numpy as _np
+        arr = _cv2.imdecode(_np.frombuffer(data, dtype=_np.uint8), _cv2.IMREAD_COLOR)
+    except Exception:  # defensive; imdecode is pure C and does not raise for bad data
+        arr = None
+    if arr is None or arr.size == 0:
+        return "", "The image could not be decoded (corrupt or unsupported format)."
+    height, width = arr.shape[:2]
+    if height * width > _ENROLL_IMAGE_MAX_PIXELS:
+        return "", (f"Image has too many pixels ({width}x{height}); "
+                    f"limit ~{_ENROLL_IMAGE_MAX_PIXELS // 1000000} MP.")
+    return _FAMILY_CANON_EXT[family], ""
+
 
 def _faces_dir() -> Path:
     return Path(FACES_DIR)
@@ -365,20 +414,28 @@ def _safe_employee_id(eid: str) -> str:
 
 
 def save_enrollment_image(emp_id: str, filename: str, data: bytes) -> tuple[bool, str]:
-    """Save an uploaded photo as ``data/faces/<EMP_ID><ext>``.
+    """Save an uploaded photo as ``data/faces/<EMP_ID><canonical-ext>``.
 
     Returns ``(ok, message)``.  Never touches biometric data -- only the raw
     image file, which the face registry consumes on rebuild.  The employee id
-    is sanitised so it cannot traverse out of ``data/faces/`` (B14).
+    is sanitised so it cannot traverse out of ``data/faces/`` (B14), and the
+    stored filename depends only on the employee id, never on the uploaded
+    filename.  The bytes are validated (size / magic bytes / OpenCV decode /
+    sane dimensions) WITHOUT loading the face model, so a bad image is
+    rejected at the upload interaction instead of at model scan time.
     """
     suffix = Path(filename).suffix.lower()
-    if suffix not in (".jpg", ".jpeg", ".png", ".bmp"):
+    family = _FAMILY_OF_SUFFIX.get(suffix.lstrip("."))
+    if family is None:
         return False, f"Unsupported image type '{suffix or '(none)'}'. Use JPG/PNG/BMP."
     eid = _safe_employee_id(emp_id)
     if not eid or eid.lower() in ("unknown", "__person__"):
         return False, (f"'{emp_id}' is not a valid employee id "
                        "(letters, digits, _ and - only).")
-    target = _faces_dir() / f"{eid}{suffix}"
+    canonical_ext, verr = _validate_enrollment_bytes(data, filename)
+    if verr:
+        return False, verr
+    target = _faces_dir() / f"{eid}{canonical_ext}"
     try:
         _faces_dir().mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
@@ -418,6 +475,128 @@ def enrollment_status_frame(status_map: dict) -> pd.DataFrame:
     ])
 
 
+# ----------------------------------------------------------------------
+# Background enrollment job (employee face validation)
+# ----------------------------------------------------------------------
+# Validate-enrollment is the only step that touches InsightFace.  Loading the
+# buffalo_l model (and downloading it on first use, long on Streamlit Cloud)
+# inside a button-click script run is what caused the long synchronous run /
+# "Connection lost".  The job runs on a daemon thread and writes its progress
+# into ``src.face_registry.ENROLL_JOB`` (a genuinely shared module, so the
+# state survives Streamlit reruns).  The script thread never blocks on the
+# model, so the upload/validation interaction stays responsive.
+
+def _enroll_work() -> dict:
+    """Run the actual face scan/rebuild (called by the worker thread).
+
+    Pure computation -- never touches ``st.*``.  Uses the process-wide shared
+    registry so the insightface model is initialised at most once per process.
+    """
+    from src.face_registry import get_shared_registry
+    registry = get_shared_registry()
+    registry.rebuild()
+    return {
+        "status": registry.employee_status(),
+        "enrolled": registry.num_enrolled_employees,
+        "embeddings": registry.num_registered,
+    }
+
+
+def _enroll_worker() -> None:
+    """Background thread body: run the scan, then publish a user-safe result."""
+    from src import face_registry as _fr
+    try:
+        result = _enroll_work()
+    except Exception as exc:  # noqa: BLE001 - controlled, user-safe surface
+        with _fr.ENROLL_LOCK:
+            _fr.ENROLL_JOB.update({
+                "state": "error", "end": time.time(),
+                "error_type": type(exc).__name__,
+                "message": ("Enrollment could not complete "
+                            f"({type(exc).__name__}). The face model may need to "
+                            "download on first use -- try again shortly, and check "
+                            "the server logs."),
+            })
+        return
+    with _fr.ENROLL_LOCK:
+        started = _fr.ENROLL_JOB.get("start") or time.time()
+        _fr.ENROLL_JOB.update({
+            "state": "done", "end": time.time(),
+            "elapsed": time.time() - started,
+            "status": result["status"],
+            "enrolled": result["enrolled"],
+            "embeddings": result["embeddings"],
+            "message": "",
+        })
+
+
+def _start_enroll_job() -> bool:
+    """Start a background enrollment job (single-flight).
+
+    Returns ``True`` when a new job was started, ``False`` when one is already
+    running.  The calling script run returns immediately.
+    """
+    from src import face_registry as _fr
+    with _fr.ENROLL_LOCK:
+        if _fr.ENROLL_JOB.get("state") == "running":
+            return False
+        _fr.ENROLL_JOB.update({
+            "state": "running", "start": time.time(), "message": "",
+            "status": {}, "enrolled": 0, "embeddings": 0, "error_type": "",
+        })
+    threading.Thread(target=_enroll_worker, daemon=True,
+                     name="employee-enroll-job").start()
+    return True
+
+
+def _reset_enroll_job() -> None:
+    """Reset the job status after a new photo is saved (old results stale)."""
+    from src import face_registry as _fr
+    with _fr.ENROLL_LOCK:
+        _fr.ENROLL_JOB.update({
+            "state": "idle", "start": 0.0, "end": 0.0, "elapsed": 0.0,
+            "status": {}, "enrolled": 0, "embeddings": 0,
+            "message": "", "error_type": "",
+        })
+
+
+def _enroll_job_snapshot() -> dict:
+    """Copy of the current job state for rendering (no shared-mutation)."""
+    from src import face_registry as _fr
+    with _fr.ENROLL_LOCK:
+        return dict(_fr.ENROLL_JOB)
+
+
+def _render_enroll_job() -> None:
+    """Auto-refreshing view of the background enrollment job.
+
+    Uses the same ``run_every`` fragment pattern as the live tabs so the page
+    keeps working while the model scans in the background -- no blocking run.
+    """
+    @st.fragment(run_every=2)
+    def _status_view():
+        job = _enroll_job_snapshot()
+        state = job.get("state", "idle")
+        if state == "running":
+            st.info("Enrollment in progress -- scanning `data/faces/` and "
+                    "extracting face embeddings...")
+            st.caption("This runs in the background; the page refreshes on its "
+                       "own when the scan completes.")
+        elif state == "done":
+            st.success(f"Validation finished -- {job.get('enrolled', 0)} "
+                       f"employee(s) enrolled, {job.get('embeddings', 0)} "
+                       "embedding(s) registered. Restart the daemon so it picks "
+                       "up the new faces.")
+            if job.get("elapsed"):
+                st.caption(f"Completed in {job['elapsed']:.1f}s.")
+            if job.get("status"):
+                st.dataframe(enrollment_status_frame(job["status"]), width="stretch")
+        elif state == "error":
+            st.error(job.get("message", "Enrollment failed."))
+
+    _status_view()
+
+
 # ======================================================================
 # Authentication (Phase 11)
 # ======================================================================
@@ -430,6 +609,44 @@ def _auth_fail_closed() -> bool:
     """Production guard: auth intended but no password set -> block access."""
     return (DASH_FAIL_CLOSED and DASH_AUTH_ENABLED
             and not bool(DASH_ADMIN_PASS or DASH_VIEWER_PASS))
+
+
+# Every session marker that carries an authenticated identity.  Cleared
+# together so a logout / session timeout can never leave a stale role behind.
+_AUTH_SESSION_KEYS = ("cctv_role", "cctv_login_ts", "_p66_login_viewer")
+
+
+def _clear_auth_session() -> None:
+    """Remove ALL authentication/session markers (logout + expiry).
+
+    Used by the logout button and the session-timeout branch so no residual
+    role, timestamp or login-mode flag can survive a sign-out.
+    """
+    for _key in _AUTH_SESSION_KEYS:
+        st.session_state.pop(_key, None)
+
+
+def _current_role() -> str:
+    """Return the authenticated role, or '' when no valid session exists.
+
+    Single source of truth for "is the user authenticated": honors the
+    auth-disabled dev mode ('admin'), enforces the session timeout, and
+    clears expired markers so nothing stale is ever repurposed.  Page bodies
+    that run inside auto-refresh ``st.fragment`` blocks MUST re-check this on
+    every execution: a ``run_every`` fragment keeps firing after logout and
+    would otherwise repaint authenticated content next to the login form.
+    """
+    if not _auth_enabled():
+        return "admin"
+    role = st.session_state.get("cctv_role")
+    if not role:
+        return ""
+    if DASH_SESSION_MINUTES > 0:
+        ts = st.session_state.get("cctv_login_ts")
+        if ts is None or (time.time() - ts) > DASH_SESSION_MINUTES * 60:
+            _clear_auth_session()
+            return ""
+    return role
 
 
 def do_auth() -> str:
@@ -448,17 +665,17 @@ def do_auth() -> str:
         return ""
     if not _auth_enabled():
         return "admin"
-    if "cctv_role" in st.session_state:
-        if DASH_SESSION_MINUTES > 0:
-            ts = st.session_state.get("cctv_login_ts")
-            if ts is None or (time.time() - ts) > DASH_SESSION_MINUTES * 60:
-                st.session_state.pop("cctv_role", None)
-                st.session_state.pop("cctv_login_ts", None)
-                st.warning("Session expired. Please sign in again.")
-            else:
-                return st.session_state["cctv_role"]
-        else:
-            return st.session_state["cctv_role"]
+    timed_out = False
+    if "cctv_role" in st.session_state and DASH_SESSION_MINUTES > 0:
+        ts = st.session_state.get("cctv_login_ts")
+        if ts is None or (time.time() - ts) > DASH_SESSION_MINUTES * 60:
+            timed_out = True
+    role = _current_role()
+    if role:
+        return role
+    if timed_out:
+        # _current_role() cleared the expired markers for us.
+        st.warning("Session expired. Please sign in again.")
     _inject_shell_css()
     col_left, col_right = st.columns([1.1, 1], gap="large")
     with col_left:
@@ -1793,6 +2010,8 @@ def _show_kv_list(items: list) -> None:
 
 
 def page_live_monitoring() -> None:
+    if not _current_role():
+        return
     live = load_live_state()
     st.html(
         _COMPONENT_CSS +
@@ -1851,6 +2070,8 @@ def _productivity_bar_figure(df_today: pd.DataFrame):
 
 
 def tab_live_overview():
+    if not _current_role():
+        return
     st.html(_p66_page_head_html(
         "Dashboard",
         "Real-time overview of your security and workplace intelligence. "
@@ -2724,8 +2945,14 @@ def tab_employees(role: str):
     st.subheader("Face Enrollment")
     st.caption("Three steps:  **1)** add the employee above, **2)** upload one "
                "clear front-facing photo (good light, close up), **3)** validate. "
-               "Validation loads the face model once -- the first run on CPU can "
-               "take 30-60 s; later runs are faster.")
+               "Uploading and saving never touches the face model; **Validate "
+               "enrollment** runs the scan in the background, so the page stays "
+               "responsive while it works (the first run loads the face model and "
+               "can take 30-60 s).")
+    st.caption("Photos are stored on the application server under "
+               "``data/faces/``. On Streamlit Cloud this folder is **not "
+               "permanent** -- it resets on redeploy/restart -- so re-upload "
+               "after a redeploy.")
     enroll_col, status_col = st.columns([1, 1])
     with enroll_col:
         upload = st.file_uploader("Enrollment photo (JPG / PNG / BMP)",
@@ -2755,6 +2982,7 @@ def tab_employees(role: str):
                         db.audit(conn, "employee.enroll_photo", actor=role,
                                  resource=sel_emp, detail=f"photo {upload.name}")
                         conn.commit()
+                        _reset_enroll_job()  # a new photo invalidates old results
                 except AccessDenied:
                     outcome = "denied"
                     msg = "Your role cannot modify employees."
@@ -2766,21 +2994,15 @@ def tab_employees(role: str):
                 else:
                     st.error(msg)
         if st.button("Validate enrollment", key="validate_enroll"):
-            st.info("Loading the face model and scanning `data/faces/` -- one moment...")
-            try:
-                from src.face_registry import FaceRegistry  # heavy import; on demand
-                registry = FaceRegistry()
-                registry.rebuild()
-                status = registry.employee_status()
-            except Exception as exc:  # noqa: BLE001 - user-friendly surface
-                st.error(f"Face validation failed: {exc}")
-                status = None
-            if status:
-                st.success(f"Validation finished -- {registry.num_enrolled_employees} "
-                           f"employee(s) enrolled, {registry.num_registered} embedding(s). "
-                           "Restart the daemon so it picks up the new faces.")
-                st.dataframe(enrollment_status_frame(status), width="stretch")
-            st.cache_data.clear()
+            started = _start_enroll_job()
+            if started:
+                st.info("Enrollment started in the background -- status updates "
+                        "below as soon as it finishes.")
+            else:
+                st.info("An enrollment is already running; the status below "
+                        "will refresh when it completes.")
+            st.rerun()
+        _render_enroll_job()
     with status_col:
         st.caption("Current status without a full re-scan (reads the cached registry):")
         if st.button("Show enrollment status (fast)", key="status_fast"):
@@ -2810,6 +3032,8 @@ def _severity_color(value) -> str:
 
 def tab_security(role):
     """Security / Incidents tab (Phase 31)."""
+    if not _current_role():
+        return
     import config
     from src.rbac import AccessGuard, AccessDenied
     conn = get_readonly_connection()
@@ -4796,8 +5020,7 @@ def main():
         if st.button(":material/refresh: Refresh now", key="p42_refresh"):
             st.rerun()
         if st.button(":material/logout: Log out", key="p42_logout"):
-            st.session_state.pop("cctv_role", None)
-            st.session_state.pop("cctv_login_ts", None)
+            _clear_auth_session()
             st.rerun()
         st.caption(f"Auto-refresh: {DASH_REFRESH_SEC}s")
 

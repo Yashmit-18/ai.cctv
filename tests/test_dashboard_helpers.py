@@ -62,10 +62,19 @@ def test_present_excludes_away():
 # ----------------------------------------------------------------------
 # Grade 28: face-enrollment helpers
 # ----------------------------------------------------------------------
+def _tiny_jpeg_bytes() -> bytes:
+    """A real decodable JPEG (upload validation now requires real bytes)."""
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (24, 24), (10, 20, 30)).save(buf, "JPEG")
+    return buf.getvalue()
+
+
 def test_save_enrollment_image_writes_face_file(tmp_path, monkeypatch):
     faces_dir = tmp_path / "faces"
     monkeypatch.setitem(_faces_dir.__globals__, "FACES_DIR", str(faces_dir))
-    ok, msg = save_enrollment_image("EMP010", "photo.jpg", b"\xff\xd8jpegdata")
+    ok, msg = save_enrollment_image("EMP010", "photo.jpg", _tiny_jpeg_bytes())
     assert ok
     assert (faces_dir / "EMP010.jpg").exists()
     assert "EMP010.jpg" in msg

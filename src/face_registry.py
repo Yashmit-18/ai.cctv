@@ -25,6 +25,7 @@ import os
 import pickle
 import re
 import sys
+import threading
 from pathlib import Path
 
 import cv2
@@ -101,6 +102,50 @@ def _providers() -> list[str]:
         providers.append("CUDAExecutionProvider")
     providers.append("CPUExecutionProvider")
     return providers
+
+
+# ----------------------------------------------------------------------
+# Process-wide registry + dashboard enrollment job state
+# ----------------------------------------------------------------------
+# A Streamlit script re-executes from the top on every rerun, so module-level
+# state in app.py would be re-created per run and cannot hold a model instance
+# or a background job's progress.  This module IS genuinely imported (shared
+# in ``sys.modules``) across script runs and sessions, so it is the stable
+# residence for the process-wide FaceRegistry and the enrollment job status.
+_REGISTRY_GLOBAL: "FaceRegistry | None" = None
+_REGISTRY_LOCK = threading.Lock()
+
+# Enrollment job status, written by a background worker thread, read by the
+# dashboard's auto-refreshing status fragment.  Keys:
+#   state      : "idle" | "running" | "done" | "error"
+#   start/end  : wall-clock time.time()
+#   elapsed    : end - start (seconds)
+#   status     : per-employee status dict from FaceRegistry.employee_status()
+#   enrolled   : number of employees with >= 1 usable embedding
+#   embeddings : number of individual embeddings stored
+#   message    : user-safe completion/error text (never a traceback)
+#   error_type : exception type name for diagnostics (no internals)
+ENROLL_LOCK = threading.Lock()
+ENROLL_JOB: dict = {
+    "state": "idle", "start": 0.0, "end": 0.0, "elapsed": 0.0,
+    "status": {}, "enrolled": 0, "embeddings": 0,
+    "message": "", "error_type": "",
+}
+
+
+def get_shared_registry(size: int = 640) -> "FaceRegistry":
+    """Return the process-wide registry, initialising it at most once.
+
+    InsightFace model initialisation is expensive (download on first use,
+    ~300 MB of onnx runtime in memory).  Sharing one instance per process
+    means the dashboard never re-initialises it per click or per rerun.
+    """
+    global _REGISTRY_GLOBAL
+    if _REGISTRY_GLOBAL is None:
+        with _REGISTRY_LOCK:
+            if _REGISTRY_GLOBAL is None:
+                _REGISTRY_GLOBAL = FaceRegistry(detect_size=size)
+    return _REGISTRY_GLOBAL
 
 
 class FaceRegistry:
