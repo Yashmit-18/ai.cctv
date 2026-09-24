@@ -90,6 +90,17 @@ faces returned ENROLLED, non-faces returned NO_FACE, and the Cloud logs were
 clean. The shipped fix is therefore Cloud-verified; only the historical
 incident's attribution remains code-level.
 
+**REGRESSION R68A (post-deployment Cloud finding) — see section 17 and 26.**
+A *subsequent* execution path on the deployed app exposed an import-time
+dependency: the enrollment-status fragment imports `src.face_registry`
+(`app._enroll_job_snapshot`), and `face_registry.py` had a **module-level
+`import cv2`** (line 31). On the Cloud image `import cv2` raises, so the
+fragment render crashed with `FragmentHandledException` (DIAG-27803). The
+earlier test evidence above remains valid for the flow it exercised; this new
+failure is a different code path. **Current on-Cloud status is therefore NOT
+VERIFIED / REGRESSION FOUND until the fix in section 26 is redeployed and
+retested.**
+
 ## 5. Exact implementation fix
 
 The fix removes the blocking model work from the script thread (minimum
@@ -246,8 +257,21 @@ storage; the one throwaway file was removed and `data/faces/` restored).
 
 ## 17. Cloud validation status
 
-**CLOUD VERIFIED** — on the **deployed commit `a783f8d`** (Streamlit Cloud,
-on-Cloud manual test).
+**Status two-part, recorded honestly:**
+
+1. **CLOUD VERIFIED (flow tested)** — on **deployed commit `a783f8d`**
+   (Streamlit Cloud, on-Cloud manual test), the tested end-to-end flow
+   completed as recorded below.
+2. **REGRESSION FOUND on a different path (R68A)** — a *subsequent*
+   execution of the enrollment-status **fragment** raised an ImportError at
+   `src/face_registry.py:31` (`import cv2`), surfaced to the UI as
+   `FragmentHandledException`, Diagnostic ID **DIAG-27803**. Because that
+   crash is on a code path that the earlier test did exercise only transitively,
+   the overall deployed state was not healthy. **Cloud is NOT VERIFIED until
+   the R68A fix is redeployed and the exact fragment path is retested on
+   Cloud (section 26).**
+
+Original deployed-test table (a783f8d, historical evidence — not rewritten):
 
 | Area | Item | Result |
 | --- | --- | --- |
@@ -317,6 +341,8 @@ exercised only for the ENROLLED and NO_FACE paths.
 
 ## 22. NOT VALIDATED
 
+- The **enrollment-status fragment on Cloud after the R68A fix** (the exact
+  crashing path) — pending redeploy + retest (section 26).
 - InsightFace **first-use model download on a cold Cloud instance** (the
   deployed test ran after the model was already warm).
 - MULTIPLE_FACES / LOW_QUALITY / INVALID_IMAGE against the real model.
@@ -347,7 +373,70 @@ exercised only for the ENROLLED and NO_FACE paths.
   the result simply takes longer.
 - Enrollment state is only refreshed by Validate or by daemon startup; a fast
   "cached status" read is shown until then.
-- The original incident's attribution stays code-level (no archived logs for
-  the pre-fix build); the shipped fix (`a783f8d`) is Cloud-verified in
-  section 17 — **all on-Cloud checks PASS, "Connection lost" did not appear,
-  Cloud logs CLEAN, no problems reported**.
+- **R68A is fixed locally but NOT yet redeployed** — the exact Cloud fragment
+  path must be retested on a new deployment before Cloud can be marked
+  VERIFIED again (section 26).  Do not treat this report's earlier a783f8d
+  result as covering the fragment-render path.
+
+## 25. R68A regression: root cause and fix (post-deployment finding)
+
+**Finding (real Cloud failure, screenshot evidence):**
+`app.py` `_enroll_job_snapshot()` (line 563) does a lazy
+`from src import face_registry` (line 565), invoked every auto-refresh by the
+enrollment-status fragment `_status_view()` (line 578). `src/face_registry.py`
+had a **module-level `import cv2`** (line 31), so importing the module on a
+Cloud image — where `import cv2` raises (broken GUI OpenCV, the Phase 63/65
+failure family, despite the headless-last requirements order) — crashed the
+fragment with ImportError → `FragmentHandledException` / DIAG-27803.
+
+**Why the earlier a783f8d upload test passed:** the test exercised the
+enrollment *job flow*, whose import of `face_registry` on Cloud either ran on
+a healthy cv2 or the tested paths did not re-import the module at that moment;
+the fragment's per-2s re-import exposed the module-scope cv2 dependency on a
+subsequent/other execution. Reported honestly rather than rewritten.
+
+**Only two code paths in `face_registry.py` actually need cv2:**
+`FaceRegistry._register_one()` (`cv2.imread`, image decode during registry
+build/enrollment) and the CLI `--diagnose` path (`cv2.imread`). All other
+module content (ENROLL_JOB state, status dicts, name lookup, numpy math) is
+cv2-free.
+
+**Fix (root-cause, not masking):**
+- Removed the module-level `import cv2` from `src/face_registry.py`.
+- Added a lazy getter `_import_cv2()` (cached handle). It loads cv2 only on
+  first use and raises an explicit `ImportError` if a decode genuinely needs
+  it — never a silent fake success.
+- Routed both `cv2.imread` call sites (`_register_one`, CLI `--diagnose`)
+  through `_import_cv2()`.
+- No allow-lists, no `except ImportError` swallowing, no enrolment weakening,
+  no requirements change, no auth/storage change. Failure surfaces as the
+  controlled enrollment-job error, and only on the decode path that truly
+  needs OpenCV — exactly the minimum import boundary (same approach already
+  used by `app._validate_enrollment_bytes`, `src.camera_store`, and Phase 65).
+
+**Verification:**
+- Focused regression tests added to `tests/test_enrollment_upload.py` (5 new,
+  none weakened):
+  1. fresh interpreter with `import cv2` blocked (`sys.modules["cv2"] = None`)
+     — `import src.face_registry` succeeds, `ENROLL_JOB` snapshot read (the
+     fragment path) works, cv2 never imported;
+  2. `_import_cv2()` raises a clear ImportError when cv2 cannot be imported;
+  3. `_import_cv2()` returns the real cv2 when available;
+  4. `_register_one` decodes through the lazy getter (stubbed cv2, fake app);
+  5. cloud-sim AppTest: cv2 blocked before face_registry import → admin →
+     Employees → Validate enrollment → fragment renders, no
+     FragmentHandledException, cv2 never loaded.
+- Full suite: **1378 passed** (was 1373 baseline); `-W error`: **1378 passed**.
+
+## 26. R68A verification status
+
+| Item | Result |
+| --- | --- |
+| Root cause identified | YES — module-level `import cv2` in `face_registry.py:31` reached via the lazy fragment import |
+| Fix applied | YES — lazy `_import_cv2()` boundary; both decode sites routed through it |
+| Focused regression (5 tests) | PASS |
+| Full pytest | 1378 passed |
+| `-W error` | 1378 passed |
+| Local real-model dashboard (AppTest, real InsightFace buffalo_l) | PASS — admin → Employees → sanity fragment + real face → ENROLLED, blank → NO_FACE, logout/login retention; 48 s, isolated temp storage, repo data untouched |
+| Cloud redeploy + exact fragment retest | **PENDING — must be executed on the new deployment** |
+| Cloud status | **NOT VERIFIED / REGRESSION FOUND until the redeploy retest passes** |

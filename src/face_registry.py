@@ -28,7 +28,6 @@ import sys
 import threading
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 from config import (EMBEDDINGS_FILE, FACE_CANDIDATE_THRESHOLD, FACE_MODEL,
@@ -36,6 +35,31 @@ from config import (EMBEDDINGS_FILE, FACE_CANDIDATE_THRESHOLD, FACE_MODEL,
 import config  # noqa: E402  (module-level settings incl. FACE_CONFUSABILITY_MAX)
 
 logger = logging.getLogger("cctv.face_registry")
+
+# OpenCV is deliberately NOT imported at module scope.  The dashboard's
+# enrollment-status fragment imports this module on the hot path
+# (``app._enroll_job_snapshot``), and on Streamlit Cloud a broken cv2
+# (GUI build needing missing libGL -- see Phase 63/65) would otherwise crash
+# that rendering with an ImportError ("Connection lost" / FragmentHandledException).
+# cv2 is required ONLY by the image-decode paths (registry build/enrollment,
+# CLI diagnose).  Those call :func:`_import_cv2`, which loads it lazily and
+# raises a clear, isolated ImportError when a decode genuinely needs it.
+_CV2 = None  # lazy cv2 handle cache
+
+
+def _import_cv2():
+    """Return the OpenCV module, importing it only when actually needed.
+
+    The import is attempted on the *first call* (typically inside a background
+    enrollment worker / registry build); any failure surfaces here as an
+    explicit ``ImportError`` blaming OpenCV, never at module import time.
+    """
+    global _CV2
+    if _CV2 is None:
+        import cv2
+        _CV2 = cv2
+    return _CV2
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FACES_DIR = Path(FACES_DIR) if not isinstance(FACES_DIR, Path) else FACES_DIR
@@ -330,7 +354,7 @@ class FaceRegistry:
         Appends to the shared build lists on success and returns the
         per-file status string.
         """
-        img = cv2.imread(str(img_path))
+        img = _import_cv2().imread(str(img_path))
         if img is None:
             logger.warning("Cannot read image (corrupt?): %s", img_path.name)
             return INVALID_IMAGE
@@ -716,7 +740,7 @@ if __name__ == "__main__":
         canonical = FACES_DIR / f"{eid}.jpg"
         src_name = canonical.name if canonical.exists() else f"{eid}.jpg (missing)"
         print("Source   :", src_name)
-        img = cv2.imread(str(canonical))
+        img = _import_cv2().imread(str(canonical))
         nfaces = 0
         if img is None:
             print("Face count: UNREADABLE IMAGE")

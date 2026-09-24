@@ -19,7 +19,11 @@ tens of seconds (model download + ~300 MB onnx load) -- the long run /
     viewer cannot.
 """
 
+import builtins
 import os
+import subprocess
+import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -503,3 +507,174 @@ def test_uploads_for_different_employees_do_not_collide(monkeypatch, tmp_path,
 def test_default_smoke_faces_directory_is_untouched():
     """Sanity: the module still exposes the canonical faces dir helper."""
     assert app._faces_dir().name == "faces"
+
+
+# ----------------------------------------------------------------------
+# Cloud import boundary: face_registry must NOT import cv2 at module scope
+# ----------------------------------------------------------------------
+# On Streamlit Cloud `import cv2` raises (GUI build needs a missing libGL --
+# Phase 63/65).  The enrollment-status fragment (app._enroll_job_snapshot)
+# lazy-imports `src.face_registry` on EVERY 2s fragment rerun, so a
+# module-level `import cv2` inside face_registry crashed that render path with
+# an ImportError wrapped as FragmentHandledException (DIAG-27803).  These
+# tests pin the boundary: module import + job snapshot need no cv2; only the
+# image-decode functions obtain it, lazily, at execution time.
+
+def test_face_registry_import_and_job_snapshot_without_cv2():
+    """Fresh interpreter with cv2 UNAVAILABLE: importing src.face_registry and
+    reading the enrollment job snapshot (the exact dashboard fragment path)
+    succeeds with zero OpenCV involvement."""
+    code = textwrap.dedent("""
+        import sys
+        sys.modules["cv2"] = None  # any `import cv2` now raises ImportError
+        import src.face_registry as fr
+
+        with fr.ENROLL_LOCK:
+            snap = dict(fr.ENROLL_JOB)          # == app._enroll_job_snapshot()
+        assert snap["state"] == "idle"
+        assert snap["status"] == {}
+        assert snap["message"] == ""
+        # The sentinel we set (None) must still be there: the module import
+        # never replaced it with a real cv2 module (which would also have
+        # raised, since `import cv2` fails in this interpreter).
+        assert sys.modules["cv2"] is None, "cv2 was imported by the module"
+
+        # status/decision helpers are pure numpy -- no cv2 either
+        assert fr.ENROLLED == "ENROLLED"
+        assert fr.RECOG_CONFIRMED == "CONFIRMED"
+        assert fr.FaceRegistry is not None
+        print("SNAPSHOT_OK")
+        """)
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    proc = subprocess.run(
+        [sys.executable, "-c", code], cwd=_ROOT,
+        capture_output=True, text=True, timeout=120, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert "SNAPSHOT_OK" in proc.stdout
+
+
+def test_lazy_cv2_import_raises_clear_error_when_unavailable(monkeypatch):
+    """When cv2 genuinely cannot be imported, only the decode path fails --
+    with an explicit ImportError, never a silent fake success."""
+    import src.face_registry as fr
+
+    monkeypatch.setattr(fr, "_CV2", None)
+    real_import = builtins.__import__
+
+    def _blocked(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "cv2" or name.startswith("cv2."):
+            raise ImportError(
+                "simulated cloud: OpenCV unavailable (GUI build needs libGL)")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _blocked)
+    with pytest.raises(ImportError) as ei:
+        fr._import_cv2()
+    assert "cv2" in str(ei.value) or "OpenCV" in str(ei.value)
+
+
+def test_lazy_cv2_import_returns_real_cv2_when_available(monkeypatch):
+    """When cv2 IS available, functions that need it still obtain the real
+    module at execution time (no functionality removed)."""
+    import src.face_registry as fr
+
+    monkeypatch.setattr(fr, "_CV2", None)
+    m = fr._import_cv2()
+    assert hasattr(m, "imread")
+    assert hasattr(m, "IMREAD_COLOR")
+
+
+def test_register_one_decodes_image_through_lazy_cv2(monkeypatch, tmp_path):
+    """The only runtime cv2 consumer (image decode during registry build)
+    reaches OpenCV via the lazy getter -- never at module scope."""
+    import numpy as np
+    import src.face_registry as fr
+
+    class FakeCV2:
+        calls = 0
+
+        @classmethod
+        def imread(cls, path):
+            cls.calls += 1
+            return np.full((200, 200, 3), 255, dtype=np.uint8)
+
+    monkeypatch.setattr(fr, "_import_cv2", lambda: FakeCV2)
+
+    class _App:
+        def get(self, img):
+            face = type("F", (), {"bbox": None, "normed_embedding": None})()
+            face.bbox = [0, 0, 160, 160]
+            emb = np.ones(512, dtype=np.float32)
+            face.normed_embedding = emb / np.linalg.norm(emb)
+            return [face]
+
+    faces_dir = tmp_path / "faces"
+    faces_dir.mkdir()
+    (faces_dir / "EMP001.jpg").write_bytes(b"unused")
+    monkeypatch.setattr(fr, "FACES_DIR", faces_dir)
+    monkeypatch.setattr(fr, "EMBEDDINGS_FILE", tmp_path / "embeddings.pkl")
+
+    reg = fr.FaceRegistry.__new__(fr.FaceRegistry)
+    reg._init_insightface = lambda detect_size=640: None
+    reg._app = _App()
+    reg._load_or_build()
+
+    assert FakeCV2.calls == 1, "image decode must go through the lazy getter"
+    assert reg.employee_status().get("EMP001") == fr.ENROLLED
+
+
+def test_enrollment_status_fragment_renders_without_cv2(monkeypatch, tmp_path):
+    """Cloud simulation: cv2 blocked BEFORE face_registry is imported, then the
+    real dashboard flow (admin -> Employees -> Validate enrollment) renders the
+    enrollment status fragment — no ImportError, no FragmentHandledException
+    (DIAG-27803) — and the module never pulled in OpenCV."""
+    _enable_auth(monkeypatch)
+    _apptest_env(monkeypatch, tmp_path)
+
+    # Simulated Cloud interpreter: cv2 cannot be imported here.
+    real_import = builtins.__import__
+
+    def _blocked(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "cv2" or name.startswith("cv2."):
+            raise ImportError(
+                "simulated cloud: OpenCV unavailable (GUI build needs libGL)")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _blocked)
+
+    # The fix means this import must succeed with cv2 blocked.
+    import src.face_registry as fr
+    assert fr._CV2 is None, "cv2 must not be loaded at module import time"
+    monkeypatch.setattr(fr, "get_shared_registry",
+                        lambda: _StubReg({"EMP900": "ENROLLED"}, 1, 1))
+    monkeypatch.setattr(fr, "_REGISTRY_GLOBAL", None)
+    fr.ENROLL_JOB.update({
+        "state": "idle", "start": 0.0, "end": 0.0, "elapsed": 0.0,
+        "status": {}, "enrolled": 0, "embeddings": 0,
+        "message": "", "error_type": "",
+    })
+
+    at = _AppTest.from_file(str(_APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    _login(at, "admin", "ph66-admin")
+    _nav_employees(at)
+    assert not at.exception, at.exception
+
+    # Drive the exact failing interaction: Validate enrollment -> fragment
+    # renders the job result.  No ImportError / FragmentHandledException.
+    [b for b in at.button if "Validate enrollment" in str(b.label)][0].click()
+    at.run()
+    at.run()
+    ok = False
+    for _ in range(60):
+        if at.exception:
+            break
+        if "Validation finished" in " ".join(str(s.value) for s in at.success):
+            ok = True
+            break
+        time.sleep(0.05)
+        at.run()
+    assert ok, "background validate never surfaced its result"
+    assert not at.exception, at.exception
+    assert fr._CV2 is None, "dashboard never imported Optical cv2"
