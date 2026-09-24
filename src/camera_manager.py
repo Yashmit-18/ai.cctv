@@ -56,6 +56,8 @@ class MultiCameraManager:
         self._captures: dict[str, VideoCapture] = {}
         self._lock = threading.Lock()
         self._started = False
+        self._batch_cursor = 0   # round-robin offset across cap-limited batches
+        self._frame_cursor = 0   # round-robin offset for latest_frames(limit)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -223,17 +225,33 @@ class MultiCameraManager:
     # ------------------------------------------------------------------
 
     def get_latest_batch(self) -> dict[str, object]:
-        """Return ``{cam_id: latest_frame_or_None, ...}`` for all cameras."""
+        """Return ``{cam_id: latest_frame_or_None, ...}`` for all cameras.
+
+        When more cameras are producing frames than ``max_batch``, the emitted
+        subset rotates round-robin from call to call, so with ``n`` live cameras
+        every one is served at least once per ``ceil(n / max_batch)`` calls.
+        Without the rotation the first ``max_batch`` cameras would monopolise
+        the batch forever and the remaining feeds could never be processed.
+        """
         with self._lock:
             captures = dict(self._captures)
         batch: dict[str, object] = {}
         for cam_id, cap in captures.items():
             batch[cam_id] = cap.read()
         if self._max_batch is not None:
-            # Emit the most "fresh" subset if we exceed the limit.  Python
-            # dict preserves insertion order, so this simply caps the size.
             ordered = [cid for cid, f in batch.items() if f is not None]
-            batch = {cid: batch[cid] for cid in ordered[:self._max_batch]}
+            n = len(ordered)
+            if n > self._max_batch:
+                with self._lock:
+                    off = self._batch_cursor % n
+                    window = ordered[off:off + self._max_batch]
+                    if len(window) < self._max_batch:
+                        window = window + ordered[:(self._max_batch - len(window))]
+                    self._batch_cursor = (off + self._max_batch) % n
+                    emit = list(window)
+                batch = {cid: batch[cid] for cid in emit}
+            else:
+                batch = {cid: batch[cid] for cid in ordered}
         return batch
 
     def latest_frames(self, limit: int | None = None, max_age: float | None = None) -> dict[str, object]:
@@ -245,7 +263,10 @@ class MultiCameraManager:
         fabricating employee AWAY/ACTIVE time).
 
         ``limit`` caps the number of live frames (used for GPU batch size
-        control downstream).
+        control downstream).  When more cameras are live than ``limit`` the
+        emitted subset rotates round-robin from call to call, so no camera is
+        ever permanently starved (``get_latest_batch`` applies the same
+        rotation at the ``max_batch`` level).
         """
         max_age = FRAME_STALE_SEC if max_age is None else max_age
         now = time.time()
@@ -260,7 +281,19 @@ class MultiCameraManager:
                 continue  # stale frame -- camera is effectively dead
             live[cid] = f
         if limit is not None:
-            live = {cid: live[cid] for cid in list(live)[:limit]}
+            live_ids = list(live)
+            n = len(live_ids)
+            if n > limit:
+                with self._lock:
+                    off = self._frame_cursor % n
+                    window = live_ids[off:off + limit]
+                    if len(window) < limit:
+                        window = window + live_ids[:limit - len(window)]
+                    self._frame_cursor = (off + limit) % n
+                    emit = list(window)
+                live = {cid: live[cid] for cid in emit}
+            else:
+                live = {cid: live[cid] for cid in live_ids}
         return live
 
     # ------------------------------------------------------------------

@@ -197,6 +197,9 @@ class VirtualCameraPool:
         self._cameras = {c.camera_id: c for c in cameras}
         self._started = False
         self._step = 0
+        # Round-robin cursor so latest_frames(limit) serves every live camera
+        # over successive calls (parity with MultiCameraManager).
+        self._frame_cursor = 0
 
     @classmethod
     def build(cls, n: int, *, seed: int = 0, default_fps: float = 15.0,
@@ -266,7 +269,17 @@ class VirtualCameraPool:
         batch = self.get_latest_batch()
         live = {cid: f for cid, f in batch.items() if f is not None}
         if limit is not None:
-            live = {cid: live[cid] for cid in list(live)[:limit]}
+            live_ids = list(live)
+            n = len(live_ids)
+            if n > limit:
+                off = self._frame_cursor % n
+                window = live_ids[off:off + limit]
+                if len(window) < limit:
+                    window = window + live_ids[:limit - len(window)]
+                self._frame_cursor = (off + limit) % n
+                live = {cid: live[cid] for cid in window}
+            else:
+                live = {cid: live[cid] for cid in live_ids}
         return live
 
     def frame_interval(self, rate: float = 15.0) -> float:
